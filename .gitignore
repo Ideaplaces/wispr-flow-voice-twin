@@ -1,0 +1,31 @@
+# Source SQLite snapshot and derived JSONL (contain personal dictation data)
+data/snapshot.sqlite
+data/snapshot.sqlite-wal
+data/snapshot.sqlite-shm
+data/history.jsonl
+data/style_profile.json
+data/edit_rules.json
+data/glossary.json
+data/chroma/
+
+# Generated drafts
+outputs/
+
+# Secrets
+.env
+.env.local
+*.env
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.eggs/
+*.egg-info/
+
+# Editor
+.vscode/
+.idea/
+*.swp
+.DS_Store

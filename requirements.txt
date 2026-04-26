@@ -1,0 +1,4 @@
+openai>=1.50           # Azure OpenAI client (chat + embeddings)
+anthropic>=0.30        # Optional: Claude fallback
+chromadb>=0.5          # Local vector store
+sentence-transformers>=3.0   # Local embedding fallback
