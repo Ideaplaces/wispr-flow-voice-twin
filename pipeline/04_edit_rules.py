@@ -77,18 +77,44 @@ def main():
                 if tag == "delete" and 1 <= len(before) <= 4:
                     word_deletes[" ".join(before).lower()] += 1
 
-    # Build glossary: recurring "thing -> Thing" or "wrong -> right" word swaps
+    # Build glossary: recurring proper-noun-like fixes only.
+    # Cheap diff between two unrelated edits ("I" -> "we" in one sentence,
+    # "had" -> "has" in another) generates a flood of meaningless function-word
+    # substitutions if we're not strict here.
+    GLOSSARY_BLOCKLIST = set("""
+        a an the and or but if then so yet for nor of in on at to from with
+        as by is are was were be been being am do does did doing have has had
+        having i me my we our us you your he his she her it its they them their
+        this that these those there here what which who whom where when why how
+        not no yes ok okay yeah well also too just only all some any many much
+        will would shall should can could may might must say said get got go went
+        come came see saw take took make made put set try tried think thought
+        know knew want wanted feel felt look looked find found
+    """.split())
+
+    def acceptable(a, b):
+        if not a or not b:
+            return False
+        if a == b or a.lower() == b.lower():
+            return False
+        if " " in a or " " in b:
+            return False
+        if not a.replace("'", "").replace("-", "").isalpha():
+            return False
+        if not b.replace("'", "").replace("-", "").isalpha():
+            return False
+        if a.lower() in GLOSSARY_BLOCKLIST or b.lower() in GLOSSARY_BLOCKLIST:
+            return False
+        # Either at least 5 chars long, or contains a capital (proper noun signal).
+        if len(a) < 5 and not (a[0].isupper() or b[0].isupper()):
+            return False
+        return True
+
     glossary = {}
-    for (a, b), n in word_swaps.most_common(200):
+    for (a, b), n in word_swaps.most_common(500):
         if n < 2:
             continue
-        if a == b:
-            continue
-        if not a or not b:
-            continue
-        if " " in a or " " in b:
-            continue
-        if a.lower() == b.lower():
+        if not acceptable(a, b):
             continue
         glossary[a] = {"correct_to": b, "frequency": n}
 
