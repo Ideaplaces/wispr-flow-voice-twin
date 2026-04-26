@@ -33,7 +33,7 @@ if ENV.exists():
 from agent import twin  # noqa: E402
 
 
-MODES = ["slack", "blog", "email", "coach"]
+MODES = ["slack", "linkedin", "twitter", "blog", "email", "coach"]
 
 
 def main():

@@ -158,7 +158,9 @@ def build_messages(mode: str, topic: str, retrieved=None, body: str = None):
     style_profile, edit_rules, glossary = load_artifacts()
     target_ctx = {
         "slack": "team_chat", "discord": "team_chat",
-        "blog": "ai_chat",  # long-form thinking comes from the AI-chat slice
+        "linkedin": "team_chat",   # polished, written-for-humans voice
+        "twitter": "team_chat",
+        "blog": "ai_chat",         # long-form thinking comes from the AI-chat slice
         "email": "team_chat", "coach": "ai_chat",
     }.get(mode, "team_chat")
 
@@ -264,7 +266,8 @@ def post_process(text: str, glossary: dict) -> str:
 
 def speak(mode: str, topic: str, body: str = None, k: int = None):
     """Generate a Chip-flavored draft for the given mode."""
-    target_ctx = {"slack": "team_chat", "blog": "ai_chat",
+    target_ctx = {"slack": "team_chat", "linkedin": "team_chat",
+                  "twitter": "team_chat", "blog": "ai_chat",
                   "email": "team_chat", "coach": "ai_chat"}.get(mode, "team_chat")
     if config.CHROMA_DIR.exists():
         try:
