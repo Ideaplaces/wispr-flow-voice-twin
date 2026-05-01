@@ -1,0 +1,195 @@
+#!/usr/bin/env python3
+"""topics - browse and query the BERTopic clusters built by 06_topics.py.
+
+Usage:
+    topics list                       Show every topic with count and label
+    topics show <topic_id>            Show full info + 10 examples for one topic
+    topics find "natural language"    Find the closest topic to a free-form query
+                                       and show its label, its examples, and
+                                       the three nearest neighboring topics.
+"""
+
+import argparse
+import json
+import logging
+import os
+import sys
+from pathlib import Path
+from typing import Optional
+
+import numpy as np
+
+# Silence BERTopic's "no embedding model attached" notice on load — we only
+# use the saved topic centroids and our own query embedder.
+logging.getLogger("BERTopic").setLevel(logging.ERROR)
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+
+ENV = ROOT / ".env"
+if ENV.exists():
+    for line in ENV.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
+
+from config import DATA_DIR  # noqa: E402
+
+TOPICS_DIR = DATA_DIR / "topics"
+INFO_PATH = TOPICS_DIR / "topic_info.json"
+DOC_TOPICS_PATH = TOPICS_DIR / "doc_topics.jsonl"
+
+
+def load_info() -> list[dict]:
+    if not INFO_PATH.exists():
+        sys.exit(f"No topic info found at {INFO_PATH}. Run pipeline/06_topics.py first.")
+    return json.loads(INFO_PATH.read_text())
+
+
+def label_for(t: dict) -> str:
+    return t.get("llm_label") or " ".join(t.get("top_words", [])[:5]) or t.get("name", "")
+
+
+def cmd_list(args: argparse.Namespace) -> None:
+    info = load_info()
+    info = [t for t in info if t["topic_id"] != -1]
+    info.sort(key=lambda t: -t["count"])
+    if args.limit:
+        info = info[: args.limit]
+    for t in info:
+        print(f"  #{t['topic_id']:>3} ({t['count']:>4}) {label_for(t)}")
+
+
+def cmd_show(args: argparse.Namespace) -> None:
+    info = load_info()
+    by_id = {t["topic_id"]: t for t in info}
+    t = by_id.get(args.topic_id)
+    if t is None:
+        sys.exit(f"Topic {args.topic_id} not found")
+    print(f"#{t['topic_id']} ({t['count']} dictations)  {label_for(t)}")
+    print(f"  top words: {', '.join(t.get('top_words', [])[:12])}")
+    print()
+
+    print("Sample dictations stored with the topic:")
+    for s in t.get("sample_dictations", [])[:3]:
+        print(f"  - {s}")
+
+    if args.examples > 3 and DOC_TOPICS_PATH.exists():
+        print(f"\nUp to {args.examples} examples from doc_topics.jsonl:")
+        seen = 0
+        with DOC_TOPICS_PATH.open() as f:
+            for line in f:
+                row = json.loads(line)
+                if row["topic_id"] == args.topic_id:
+                    ctx = row.get("ctx") or ""
+                    print(f"  [{ctx:<14}] {row['preview']}")
+                    seen += 1
+                    if seen >= args.examples:
+                        break
+
+
+def _embed_query(query: str) -> np.ndarray:
+    """Embed a query string with the same provider used in 05_embed.py."""
+    provider = os.environ.get("EMBED_PROVIDER", "auto")
+
+    if provider in ("azure", "auto") and os.environ.get("AZURE_OPENAI_API_KEY"):
+        try:
+            from openai import AzureOpenAI
+            client = AzureOpenAI(
+                api_key=os.environ["AZURE_OPENAI_API_KEY"],
+                api_version=os.environ.get("AZURE_OPENAI_API_VERSION", "2024-02-01"),
+                azure_endpoint=os.environ["AZURE_OPENAI_ENDPOINT"],
+            )
+            deployment = os.environ.get(
+                "AZURE_OPENAI_EMBEDDING_DEPLOYMENT", "text-embedding-3-large"
+            )
+            resp = client.embeddings.create(model=deployment, input=[query])
+            return np.array(resp.data[0].embedding, dtype=np.float32)
+        except Exception as e:
+            print(f"[topics] Azure embed failed ({e}), falling back to local", file=sys.stderr)
+
+    from sentence_transformers import SentenceTransformer
+    model_name = os.environ.get(
+        "LOCAL_EMBED_MODEL", "sentence-transformers/all-mpnet-base-v2"
+    )
+    st = SentenceTransformer(model_name)
+    return st.encode([query], normalize_embeddings=True)[0].astype(np.float32)
+
+
+def cmd_find(args: argparse.Namespace) -> None:
+    from bertopic import BERTopic
+    model_path = TOPICS_DIR / "model"
+    if not model_path.exists():
+        sys.exit(f"No model at {model_path}. Run pipeline/06_topics.py first.")
+
+    model = BERTopic.load(str(model_path))
+    info = {t["topic_id"]: t for t in load_info()}
+
+    # Embed the query with the same provider used for the corpus.
+    query_emb = _embed_query(args.query)
+
+    # BERTopic stored each topic's centroid (mean of its docs' embeddings)
+    # in topic_embeddings_; row 0 is the -1 outlier topic, then 0, 1, 2...
+    topic_emb = np.array(model.topic_embeddings_, dtype=np.float32)
+    topic_ids = sorted(set(t["topic_id"] for t in info.values()))
+
+    # First row corresponds to topic -1, the rest follow numerical order.
+    rows_for_id = {tid: idx + 1 for idx, tid in enumerate(sorted(t for t in topic_ids if t != -1))}
+
+    def cos(a: np.ndarray, b: np.ndarray) -> float:
+        denom = (np.linalg.norm(a) * np.linalg.norm(b)) or 1.0
+        return float(np.dot(a, b) / denom)
+
+    sims = [(tid, cos(query_emb, topic_emb[rows_for_id[tid]]))
+            for tid in topic_ids if tid != -1 and tid in rows_for_id]
+    sims.sort(key=lambda p: -p[1])
+    sims = sims[:4]
+
+    if not sims:
+        sys.exit("No matching topic found")
+
+    primary, primary_sim = sims[0]
+    primary_info = info.get(primary, {})
+    print(f"Best match for: {args.query!r}")
+    print()
+    print(f"  #{primary} ({primary_info.get('count', '?')} dictations) "
+          f"sim={primary_sim:.3f}  {label_for(primary_info)}")
+    print(f"  top words: {', '.join(primary_info.get('top_words', [])[:10])}")
+    print()
+
+    print("  examples:")
+    for s in primary_info.get("sample_dictations", [])[:3]:
+        print(f"    - {s}")
+    print()
+
+    print("Nearby topics you can hop to:")
+    for tid, sim in sims[1:]:
+        t = info.get(tid, {})
+        print(f"  #{tid} ({t.get('count', '?')} docs) sim={sim:.3f}  {label_for(t)}")
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(prog="topics", description="Browse voice-twin topic clusters")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    p_list = sub.add_parser("list", help="List topics by size")
+    p_list.add_argument("--limit", type=int, default=None, help="Cap how many to print")
+    p_list.set_defaults(func=cmd_list)
+
+    p_show = sub.add_parser("show", help="Show one topic in detail")
+    p_show.add_argument("topic_id", type=int)
+    p_show.add_argument("--examples", type=int, default=10, help="How many sample dictations")
+    p_show.set_defaults(func=cmd_show)
+
+    p_find = sub.add_parser("find", help="Find the topic that best matches a query")
+    p_find.add_argument("query")
+    p_find.set_defaults(func=cmd_find)
+
+    args = ap.parse_args()
+    args.func(args)
+
+
+if __name__ == "__main__":
+    main()
