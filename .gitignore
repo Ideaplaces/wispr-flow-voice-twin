@@ -9,6 +9,7 @@ data/glossary.json
 data/chroma/
 data/topics/
 data/inbox/
+data/logs/
 
 # Generated drafts
 outputs/
