@@ -10,6 +10,12 @@ data/chroma/
 data/topics/
 data/inbox/
 data/logs/
+data/viz/
+
+# Web explorer build artifacts
+web/node_modules/
+web/.next/
+web/out/
 
 # Generated drafts
 outputs/
