@@ -45,7 +45,6 @@ export default function GraphExplorer() {
   const [selected, setSelected] = useState<Node | null>(null);
   const [hovered, setHovered] = useState<Node | null>(null);
   const [topicFilter, setTopicFilter] = useState<number | null>(null);
-  const [showAllEdges, setShowAllEdges] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
   const [loadProgress, setLoadProgress] = useState<string>("Fetching graph...");
 
@@ -177,6 +176,10 @@ export default function GraphExplorer() {
 
     const selectedId = selected?.id ?? null;
     const selectedNeighbors = selectedId ? neighborsRef.current.get(selectedId) : null;
+    // Hovered node's neighbors only contribute when nothing is selected, so a
+    // mouse glimpse never overrides a sticky click.
+    const hoveredId = !selectedId ? hovered?.id ?? null : null;
+    const hoveredNeighbors = hoveredId ? neighborsRef.current.get(hoveredId) : null;
 
     renderer.setSetting("nodeReducer", (id: string, attrs: Record<string, unknown>) => {
       const n = nodeIndexRef.current.get(id);
@@ -195,6 +198,13 @@ export default function GraphExplorer() {
         return { ...attrs, color: "#222222", size: 0.9, label: "" };
       }
       if (topicFilter !== null) return { ...attrs, size: 4 };
+      // Hover preview: gently emphasize the hovered node and its neighbors.
+      if (hoveredId) {
+        if (id === hoveredId) return { ...attrs, size: 5, zIndex: 2 };
+        if (hoveredNeighbors && hoveredNeighbors.has(id)) {
+          return { ...attrs, size: 4, zIndex: 1 };
+        }
+      }
       return attrs;
     });
 
@@ -231,13 +241,23 @@ export default function GraphExplorer() {
         }
         return { ...attrs, color: "rgba(255,255,255,0.3)", size: 0.6, hidden: false };
       }
-      // Default: edges hidden unless toggled on.
-      if (showAllEdges) return { ...attrs, hidden: false };
+      // Default: edges only show for the hovered node's neighbors. Without
+      // a hover, the graph stays a clean cluster scatter.
+      if (hoveredId && (src === hoveredId || tgt === hoveredId)) {
+        const other = src === hoveredId ? tgt : src;
+        const otherNode = nodeIndexRef.current.get(other);
+        return {
+          ...attrs,
+          color: otherNode?.color ?? "rgba(255,255,255,0.6)",
+          size: 1.4,
+          hidden: false,
+        };
+      }
       return { ...attrs, hidden: true };
     });
 
     renderer.refresh();
-  }, [selected, topicFilter, showAllEdges]);
+  }, [selected, hovered, topicFilter]);
 
   const topTopics = useMemo(() => (data?.topics ?? []).slice(0, 30), [data]);
 
@@ -326,30 +346,11 @@ export default function GraphExplorer() {
           <SelectedPanel node={selected} onBack={() => setSelected(null)} />
         ) : (
           <div>
-            <p style={{ fontSize: 12, color: "#777", lineHeight: 1.55, margin: "0 0 14px 0" }}>
-              Hover any node to peek. Click to see its three nearest semantic neighbors.
-              Pick a topic to isolate one thread.
+            <p style={{ fontSize: 12, color: "#777", lineHeight: 1.55, margin: "0 0 18px 0" }}>
+              Hover any node to glimpse its three nearest neighbors. Click to
+              hold the highlight and read the dictation. Pick a topic to
+              isolate one thread.
             </p>
-            <label
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: 8,
-                fontSize: 11,
-                color: "#888",
-                marginBottom: 18,
-                cursor: "pointer",
-                userSelect: "none",
-              }}
-            >
-              <input
-                type="checkbox"
-                checked={showAllEdges}
-                onChange={(e) => setShowAllEdges(e.target.checked)}
-                style={{ accentColor: "#5499C7" }}
-              />
-              show all edges (slower)
-            </label>
             <div style={{ marginBottom: 12, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
               <span style={{ fontSize: 11, color: "#666", textTransform: "uppercase", letterSpacing: 0.6 }}>
                 Topics ({topTopics.length} of {data?.stats.n_topics ?? 0})
