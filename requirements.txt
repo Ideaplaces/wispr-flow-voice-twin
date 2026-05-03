@@ -1,4 +1,11 @@
-openai>=1.50           # Azure OpenAI client (chat + embeddings)
-anthropic>=0.30        # Optional: Claude fallback
+openai>=1.50           # Azure OpenAI + OpenAI direct client
+anthropic>=0.30        # Anthropic LLM provider
 chromadb>=0.5          # Local vector store
 sentence-transformers>=3.0   # Local embedding fallback
+bertopic>=0.17         # Topic clustering
+hdbscan>=0.8           # density-based clustering for BERTopic
+umap-learn>=0.5        # 2D layout for the explorer
+scikit-learn>=1.3      # CountVectorizer + NearestNeighbors
+mcp>=1.0               # MCP server SDK
+pyyaml>=6.0            # profile.md frontmatter parsing
+requests>=2.30         # remote profile loading + Ollama HTTP client

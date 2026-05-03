@@ -69,6 +69,12 @@ Wispr Flow turns voice into the primary input method. Once you cross a few hundr
 
 It started as a personal tool, then we noticed it was useful for anyone with a Wispr Flow corpus, and now it's open source.
 
+## MCP server
+
+The voice twin ships an MCP server that runs as a stdio child process. Drop it into Claude Desktop, Claude Code, or Cursor and seven tools appear automatically: `voice_search`, `voice_topics_list`, `voice_topic_show`, `voice_topic_find`, `voice_draft`, `voice_coach`, `voice_patterns_list`. Any session in any client gains the ability to query your corpus, draft in your voice, and surface your automation candidates without leaving the chat.
+
+Setup details and per-client config in [docs/mcp.md](docs/mcp.md).
+
 ## How it fits together
 
 ```
