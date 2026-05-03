@@ -1,0 +1,151 @@
+#!/usr/bin/env python3
+"""patterns - browse automation candidates surfaced by pipeline/09_patterns.py.
+
+Reads data/patterns/automation_candidates.json and prints the topics that
+look most like recurring instructions. Optional `show <topic_id>` mode
+prints all evidence (samples, date range, density) for one candidate.
+
+Usage:
+    patterns list                    # top 20 candidates by score
+    patterns list -n 50              # top 50
+    patterns list --min-density 0.5  # only topics where most dictations are imperative
+    patterns show 4                  # all evidence for topic id 4
+    patterns suggest 4               # ask the LLM for a concrete automation
+"""
+
+import argparse
+import json
+import os
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+
+ENV = ROOT / ".env"
+if ENV.exists():
+    for line in ENV.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
+
+from config import DATA_DIR  # noqa: E402
+
+CANDIDATES_PATH = DATA_DIR / "patterns" / "automation_candidates.json"
+
+
+def load() -> dict:
+    if not CANDIDATES_PATH.exists():
+        sys.exit(f"No candidates at {CANDIDATES_PATH}. Run pipeline/09_patterns.py first.")
+    return json.loads(CANDIDATES_PATH.read_text())
+
+
+def cmd_list(args: argparse.Namespace) -> None:
+    data = load()
+    rows = data["candidates"]
+    if args.min_density:
+        rows = [r for r in rows if r["imperative_density"] >= args.min_density]
+    if args.min_count:
+        rows = [r for r in rows if r["count"] >= args.min_count]
+    rows = rows[: args.top]
+
+    print(f"Top {len(rows)} automation candidates (corpus generated {data.get('generated_at', '?')})")
+    print("=" * 88)
+    for i, c in enumerate(rows, 1):
+        density_pct = c["imperative_density"] * 100
+        print(f"{i:2d}. #{c['topic_id']:<3} score={c['score']:>6.2f}  "
+              f"{c['count']:>4} dicts  {density_pct:>5.1f}% imp  "
+              f"{c['unique_days']:>3}d  -> {c['label']}")
+    print()
+    print("Use `patterns show <topic_id>` for evidence on any candidate.")
+
+
+def cmd_show(args: argparse.Namespace) -> None:
+    data = load()
+    by_id = {c["topic_id"]: c for c in data["candidates"]}
+    c = by_id.get(args.topic_id)
+    if c is None:
+        sys.exit(f"Topic {args.topic_id} not in candidates. Try `patterns list`.")
+    print(f"Topic #{c['topic_id']}: {c['label']}")
+    print("-" * 88)
+    print(f"  count          : {c['count']}")
+    print(f"  imperative     : {c['imperative_count']} of {c['count']}  ({c['imperative_density']*100:.1f}%)")
+    print(f"  unique days    : {c['unique_days']}")
+    print(f"  date range     : {c['first_seen']} .. {c['last_seen']}")
+    print(f"  score          : {c['score']:.4f}")
+    print()
+    print("Sample dictations (imperatives first):")
+    for s in c["samples"]:
+        marker = "!" if s["imperative"] else " "
+        ts = (s["ts"] or "")[:10]
+        print(f"  {marker} [{ts}] {s['preview']}")
+
+
+def cmd_suggest(args: argparse.Namespace) -> None:
+    """Ask the LLM to propose a concrete automation for one candidate."""
+    data = load()
+    by_id = {c["topic_id"]: c for c in data["candidates"]}
+    c = by_id.get(args.topic_id)
+    if c is None:
+        sys.exit(f"Topic {args.topic_id} not in candidates.")
+
+    from llm import generate, describe_active_provider
+
+    prompt = (
+        "You are reviewing recurring spoken instructions one person has given "
+        "their AI assistant repeatedly over months. Your job is to propose a "
+        "single concrete automation that would cover this pattern, so the "
+        "person never has to dictate it again.\n\n"
+        f"Pattern label: {c['label']}\n"
+        f"Stats: {c['count']} dictations across {c['unique_days']} distinct days, "
+        f"{c['imperative_density']*100:.0f}% imperative, "
+        f"first {c['first_seen']} .. last {c['last_seen']}.\n\n"
+        "Representative dictations:\n"
+        + "\n".join(f"- {s['preview']}" for s in c["samples"])
+        + "\n\n"
+        "Propose:\n"
+        "1. A short name for the automation.\n"
+        "2. The trigger (event, schedule, or keyword) that should invoke it.\n"
+        "3. The implementation in 5-8 bullet steps. Be specific (CLI, script, "
+        "GitHub Action, Claude Code skill, cron job).\n"
+        "4. The first concrete action the person should take to start building it."
+    )
+
+    print(f"[suggest] using {describe_active_provider()}")
+    print()
+    text, source = generate(
+        [{"role": "user", "content": prompt}],
+        max_tokens=1200,
+        temperature=0.4,
+    )
+    print(text)
+    print()
+    print(f"-- {source}")
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(prog="patterns", description="Browse automation candidates from the voice corpus")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    pl = sub.add_parser("list", help="Top automation candidates by score")
+    pl.add_argument("-n", "--top", type=int, default=20, help="How many to print (default 20)")
+    pl.add_argument("--min-density", type=float, default=None, help="Filter by minimum imperative density (0..1)")
+    pl.add_argument("--min-count", type=int, default=None, help="Filter by minimum dictation count")
+    pl.set_defaults(func=cmd_list)
+
+    ps = sub.add_parser("show", help="Show evidence for one candidate")
+    ps.add_argument("topic_id", type=int)
+    ps.set_defaults(func=cmd_show)
+
+    psg = sub.add_parser("suggest", help="Ask the LLM to propose an automation")
+    psg.add_argument("topic_id", type=int)
+    psg.set_defaults(func=cmd_suggest)
+
+    args = ap.parse_args()
+    args.func(args)
+
+
+if __name__ == "__main__":
+    main()
