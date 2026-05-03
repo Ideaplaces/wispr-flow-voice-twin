@@ -74,7 +74,7 @@ class Profile:
         """Return the markdown body of `## name` if present, else empty string."""
         return self.sections.get(name.lower(), "")
 
-    def render(self, template: str) -> str:
+    def render(self, template: str, extra: dict | None = None) -> str:
         """Substitute {{...}} placeholders in a prompt template.
 
         Supported placeholders:
@@ -82,11 +82,16 @@ class Profile:
           {{preferred_punctuation}}, {{companies}}, {{taboo_phrases}},
           {{glossary}}, {{section.blog}}, {{section.slack}}, etc.
 
+        Pass `extra={"style_summary": ..., "examples": ...}` to inject
+        additional values that are computed at call time and not part of
+        the static profile. Extras override profile fields with the same
+        name.
+
         Lists render as bullet lines; dicts render as 'key -> value' lines.
         Unknown placeholders pass through unchanged so templates can be
         partial-rendered safely.
         """
-        ctx = {
+        ctx: dict[str, Any] = {
             "name": self.name,
             "nickname": self.nickname or self.name,
             "positioning": self.positioning,
@@ -96,10 +101,14 @@ class Profile:
             "taboo_phrases": _render_list(self.taboo_phrases),
             "glossary": _render_glossary(self.glossary),
         }
+        if extra:
+            ctx.update(extra)
 
         out = template
         for key, val in ctx.items():
-            out = out.replace(f"{{{{{key}}}}}", str(val) if val is not None else "")
+            if val is None:
+                val = ""
+            out = out.replace(f"{{{{{key}}}}}", str(val))
 
         # Section overrides: {{section.blog}}, {{section.slack}}, ...
         def section_sub(match: re.Match[str]) -> str:

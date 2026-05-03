@@ -6,8 +6,14 @@ module:
   2. Retrieves the K nearest past dictations, biased toward the same context
   3. Loads the per-context style fingerprint and the edit rules
   4. Builds a system prompt that wires all of the above into the model
-  5. Calls the configured LLM (Azure OpenAI primary, Anthropic fallback)
+  5. Calls the configured LLM via llm.generate (any of azure / openai /
+     anthropic / ollama)
   6. Applies post-generation rules (em-dash strip, glossary touch-up)
+
+Identity, taboo phrases, positioning, and prompt section overrides come
+from the profile loaded by profile.load_profile() so that the same
+codebase produces the right voice for whoever has VOICE_TWIN_PROFILE
+pointed at their own profile file.
 """
 
 import json
@@ -19,7 +25,21 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+# Bootstrap .env before importing config so AZURE_*, OPENAI_*, etc. are in
+# os.environ when config reads them. Without this, importing twin from a
+# fresh REPL would see config with all-None credentials.
+_ENV = ROOT / ".env"
+if _ENV.exists():
+    for _line in _ENV.read_text().splitlines():
+        _line = _line.strip()
+        if not _line or _line.startswith("#") or "=" not in _line:
+            continue
+        _k, _v = _line.split("=", 1)
+        os.environ.setdefault(_k.strip(), _v.strip().strip('"').strip("'"))
+
 import config  # noqa: E402
+from llm import generate as llm_generate  # noqa: E402
+from profile import load_profile  # noqa: E402
 
 PROMPTS_DIR = ROOT / "agent" / "prompts"
 
@@ -161,6 +181,7 @@ def build_messages(mode: str, topic: str, retrieved=None, body: str = None):
         "linkedin": "team_chat",   # polished, written-for-humans voice
         "twitter": "team_chat",
         "blog": "ai_chat",         # long-form thinking comes from the AI-chat slice
+        "rewrite": "ai_chat",      # blog-shaped rewrite of an existing post
         "email": "team_chat", "coach": "ai_chat",
     }.get(mode, "team_chat")
 
@@ -175,11 +196,18 @@ def build_messages(mode: str, topic: str, retrieved=None, body: str = None):
             items.append(f"[{i}] ({ctx} {ts}) sim={hit['sim']:.2f}\n{hit['doc']}\n")
         examples_block = "\n".join(items)
 
-    system = template.format(
-        style_summary=style_summary(style_profile, target_ctx),
-        edit_rules=edit_rules_summary(edit_rules),
-        glossary=glossary_summary(glossary),
-        examples=examples_block or "(no past dictations retrieved)",
+    profile = load_profile()
+    system = profile.render(
+        template,
+        extra={
+            "style_summary": style_summary(style_profile, target_ctx) or "(no style profile yet)",
+            "edit_rules": edit_rules_summary(edit_rules) or "(no edit rules yet)",
+            # The static profile glossary already lives at {{glossary}}, but if
+            # the auto-generated glossary.json artifact exists, prefer it: it's
+            # frequency-weighted from the user's actual transcription edits.
+            "glossary": glossary_summary(glossary) or _format_profile_glossary(profile),
+            "examples": examples_block or "(no past dictations retrieved)",
+        },
     )
 
     user_input = topic
@@ -193,46 +221,32 @@ def build_messages(mode: str, topic: str, retrieved=None, body: str = None):
 
 
 # ---------------------------------------------------------------------------
-# LLM dispatch
+# LLM dispatch (delegates to llm.py for provider routing)
 # ---------------------------------------------------------------------------
 
 
-def call_azure(messages, max_tokens=1200, temperature=0.7):
-    from openai import AzureOpenAI
-    client = AzureOpenAI(
-        azure_endpoint=config.AZURE_OPENAI_ENDPOINT,
-        api_key=config.AZURE_OPENAI_API_KEY,
-        api_version=config.AZURE_OPENAI_API_VERSION,
-    )
-    deployment = config.AZURE_OPENAI_CHAT_DEPLOYMENT
-    resp = client.chat.completions.create(
-        model=deployment, messages=messages,
-        max_tokens=max_tokens, temperature=temperature,
-    )
-    return resp.choices[0].message.content.strip(), f"Azure OpenAI ({deployment})"
+def _format_profile_glossary(profile) -> str:
+    """Render the static profile glossary if no auto-generated one exists."""
+    if not profile.glossary:
+        return "(none)"
+    lines = ["Always use the right-hand spelling:"]
+    for wrong, correct in profile.glossary.items():
+        lines.append(f"  '{wrong}' -> '{correct}'")
+    return "\n".join(lines)
 
 
-def call_anthropic(messages, max_tokens=1200, temperature=0.7):
-    from anthropic import Anthropic
-    client = Anthropic(api_key=config.ANTHROPIC_API_KEY)
-    system = next((m["content"] for m in messages if m["role"] == "system"), "")
-    user_msgs = [m for m in messages if m["role"] != "system"]
-    resp = client.messages.create(
-        model=config.ANTHROPIC_MODEL, max_tokens=max_tokens,
-        temperature=temperature, system=system, messages=user_msgs,
-    )
-    return resp.content[0].text.strip(), f"Anthropic ({config.ANTHROPIC_MODEL})"
+def generate(messages, deployment=None, max_tokens=1200, temperature=0.7, **kwargs):
+    """Provider-agnostic chat completion via llm.py.
 
-
-def generate(messages, **kwargs):
-    if config.AZURE_OPENAI_API_KEY and config.AZURE_OPENAI_ENDPOINT:
-        try:
-            return call_azure(messages, **kwargs)
-        except Exception as e:
-            print(f"  Azure call failed: {e}", file=sys.stderr)
-    if config.ANTHROPIC_API_KEY:
-        return call_anthropic(messages, **kwargs)
-    raise RuntimeError("No LLM provider configured. Set AZURE_OPENAI_* or ANTHROPIC_API_KEY.")
+    `deployment` is honored when the active provider is Azure OpenAI so
+    callers can override the deployment per-call (the topics labeler does
+    this). For other providers it is ignored.
+    """
+    extra: dict = {}
+    if deployment:
+        extra["deployment"] = deployment
+        extra["model"] = deployment
+    return llm_generate(messages, max_tokens=max_tokens, temperature=temperature, **extra, **kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -264,10 +278,12 @@ def post_process(text: str, glossary: dict) -> str:
 # ---------------------------------------------------------------------------
 
 
-def speak(mode: str, topic: str, body: str = None, k: int = None):
+def speak(mode: str, topic: str, body: str = None, k: int = None,
+          deployment: str = None, max_tokens: int = 1500):
     """Generate a Chip-flavored draft for the given mode."""
     target_ctx = {"slack": "team_chat", "linkedin": "team_chat",
                   "twitter": "team_chat", "blog": "ai_chat",
+                  "rewrite": "ai_chat",
                   "email": "team_chat", "coach": "ai_chat"}.get(mode, "team_chat")
     if config.CHROMA_DIR.exists():
         try:
@@ -279,7 +295,7 @@ def speak(mode: str, topic: str, body: str = None, k: int = None):
         retrieved = []
 
     messages = build_messages(mode, topic, retrieved=retrieved, body=body)
-    out, source = generate(messages)
+    out, source = generate(messages, deployment=deployment, max_tokens=max_tokens)
     _, _, glossary = load_artifacts()
     out = post_process(out, glossary)
     return out, source, retrieved

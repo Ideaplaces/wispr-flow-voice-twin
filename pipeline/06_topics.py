@@ -138,27 +138,22 @@ def fit_topics(model: BERTopic, docs: list[str], embeddings: np.ndarray):
 
 
 def maybe_llm_label(model: BERTopic, top_n: int) -> dict[int, str]:
-    """Optionally name the top N topics using Azure OpenAI."""
+    """Optionally name the top N topics using whichever LLM provider is
+    configured. Routes through llm.py so the same code works against
+    Azure, OpenAI direct, Anthropic, or local Ollama."""
     if not LLM_LABELS:
         return {}
     try:
-        from openai import AzureOpenAI
+        from llm import generate as llm_generate, describe_active_provider
     except Exception as e:
-        _print(f"openai not importable, skipping LLM labels: {e}")
+        _print(f"llm.py not importable, skipping LLM labels: {e}")
         return {}
-
-    client = AzureOpenAI(
-        api_key=os.environ.get("AZURE_OPENAI_API_KEY"),
-        api_version=os.environ.get("AZURE_OPENAI_API_VERSION", "2024-02-01"),
-        azure_endpoint=os.environ.get("AZURE_OPENAI_ENDPOINT"),
-    )
-    deployment = os.environ.get("AZURE_OPENAI_CHAT_DEPLOYMENT", "gpt-4o-mini")
 
     info = model.get_topic_info().head(top_n + 1)  # +1 because -1 is row 0
     info = info[info.Topic != -1]
 
     labels: dict[int, str] = {}
-    _print(f"LLM-naming top {len(info)} topics via {deployment}")
+    _print(f"LLM-naming top {len(info)} topics via {describe_active_provider()}")
     for _, row in info.iterrows():
         tid = int(row.Topic)
         words = [w for w, _ in model.get_topic(tid)][:10]
@@ -173,23 +168,12 @@ def maybe_llm_label(model: BERTopic, top_n: int) -> dict[int, str]:
             "Label:"
         )
         try:
-            kwargs = {
-                "model": deployment,
-                "messages": [{"role": "user", "content": prompt}],
-            }
-            try:
-                # GPT-5 / o-series style. The budget covers internal reasoning
-                # plus output, so it must be generous; GPT-5 spends 200-400
-                # tokens reasoning before emitting the label.
-                resp = client.chat.completions.create(
-                    **kwargs, max_completion_tokens=1000
-                )
-            except Exception:
-                # Older deployments expect max_tokens + temperature
-                resp = client.chat.completions.create(
-                    **kwargs, max_tokens=20, temperature=0.2
-                )
-            label = (resp.choices[0].message.content or "").strip().strip('"').rstrip(".")
+            text, _src = llm_generate(
+                [{"role": "user", "content": prompt}],
+                max_tokens=200,
+                temperature=0.2,
+            )
+            label = (text or "").strip().strip('"').rstrip(".")
             if not label:
                 raise RuntimeError("empty label")
             labels[tid] = label
