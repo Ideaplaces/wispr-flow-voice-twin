@@ -1,0 +1,123 @@
+#!/usr/bin/env python3
+"""search - semantic search across the indexed voice corpus.
+
+Embeds a free-form query through the same provider used to embed the corpus,
+runs a top-K nearest-neighbor lookup against the Chroma collection, and
+prints results ranked by similarity.
+
+Usage:
+    search "terraform deploying sentry"
+    search -k 100 "everything I said about onboarding flows"
+    search --ctx team_chat "discord notifications"   # restrict to one context
+    search --since 2026-03-01 "azure key vault"      # restrict by date
+    search --json "..."                              # machine-readable output
+"""
+
+import argparse
+import json
+import os
+import sys
+from datetime import datetime
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+
+ENV = ROOT / ".env"
+if ENV.exists():
+    for line in ENV.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
+
+from config import CHROMA_DIR  # noqa: E402
+
+COLLECTION_NAME = "voice_twin_v1"
+
+
+def embed_query(query: str):
+    provider = os.environ.get("EMBED_PROVIDER", "auto")
+    if provider in ("azure", "auto") and os.environ.get("AZURE_OPENAI_API_KEY"):
+        from openai import AzureOpenAI
+        client = AzureOpenAI(
+            api_key=os.environ["AZURE_OPENAI_API_KEY"],
+            api_version=os.environ.get("AZURE_OPENAI_API_VERSION", "2024-02-01"),
+            azure_endpoint=os.environ["AZURE_OPENAI_ENDPOINT"],
+        )
+        deployment = os.environ.get("AZURE_OPENAI_EMBEDDING_DEPLOYMENT", "text-embedding-3-large")
+        return client.embeddings.create(model=deployment, input=[query]).data[0].embedding
+
+    from sentence_transformers import SentenceTransformer
+    model_name = os.environ.get("LOCAL_EMBED_MODEL", "sentence-transformers/all-mpnet-base-v2")
+    st = SentenceTransformer(model_name)
+    return st.encode([query], normalize_embeddings=True)[0].tolist()
+
+
+def main():
+    ap = argparse.ArgumentParser(prog="search", description="Semantic search across the voice corpus")
+    ap.add_argument("query", help="Natural-language query")
+    ap.add_argument("-k", "--top", type=int, default=50, help="Number of results (default 50)")
+    ap.add_argument("--ctx", help="Restrict to one context (ai_chat, team_chat, personal_chat, browser, other)")
+    ap.add_argument("--since", help="Earliest date (YYYY-MM-DD)")
+    ap.add_argument("--until", help="Latest date (YYYY-MM-DD)")
+    ap.add_argument("--width", type=int, default=180, help="Truncate text at N chars in pretty mode")
+    ap.add_argument("--json", action="store_true", help="Emit JSON instead of pretty rows")
+    args = ap.parse_args()
+
+    qemb = embed_query(args.query)
+
+    where = {}
+    if args.ctx:
+        where["ctx"] = args.ctx
+    if args.since or args.until:
+        # ts is stored as YYYY-MM-DD in metadata, so string compare works.
+        date_filter = {}
+        if args.since:
+            date_filter["$gte"] = args.since
+        if args.until:
+            date_filter["$lte"] = args.until
+        where["ts"] = date_filter
+
+    import chromadb
+    chroma = chromadb.PersistentClient(path=str(CHROMA_DIR))
+    coll = chroma.get_collection(COLLECTION_NAME)
+
+    kwargs = dict(query_embeddings=[qemb], n_results=args.top, include=["documents", "metadatas", "distances"])
+    if where:
+        kwargs["where"] = where if len(where) > 1 else where
+        # Chroma needs $and wrapping when there are multiple filters in some versions;
+        # for a single-key filter the bare dict is accepted.
+        if len(where) > 1:
+            kwargs["where"] = {"$and": [{k: v} for k, v in where.items()]}
+
+    res = coll.query(**kwargs)
+
+    rows = []
+    for did, doc, meta, dist in zip(res["ids"][0], res["documents"][0], res["metadatas"][0], res["distances"][0]):
+        rows.append({
+            "id": did,
+            "sim": round(1.0 - float(dist), 4),
+            "ts": meta.get("ts", ""),
+            "ctx": meta.get("ctx", ""),
+            "n_words": meta.get("n_words", 0),
+            "text": doc,
+        })
+
+    if args.json:
+        print(json.dumps({"query": args.query, "k": args.top, "results": rows}, ensure_ascii=False, indent=2))
+        return
+
+    print(f"Top {len(rows)} dictations for: {args.query!r}")
+    print("=" * 80)
+    for i, r in enumerate(rows, 1):
+        ts = (r["ts"] or "")[:10]
+        text = (r["text"] or "").replace("\n", " ")
+        if len(text) > args.width:
+            text = text[: args.width - 1] + "…"
+        print(f"{i:2d}. [sim={r['sim']:.3f}] {ts} {r['ctx']:14s} {text}")
+
+
+if __name__ == "__main__":
+    main()
