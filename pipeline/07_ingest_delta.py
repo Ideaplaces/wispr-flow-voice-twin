@@ -1,9 +1,15 @@
 #!/usr/bin/env python3
-"""07_ingest_delta.py - Apply a Mac-side delta JSONL to this corpus.
+"""07_ingest_delta.py - Apply Mac-side delta JSONLs to this corpus.
 
-Reads new dictation records from data/inbox/wispr-flow-delta.jsonl, embeds
-only the ones not already in Chroma, appends them to data/history.jsonl,
-and moves the inbox file to data/inbox/processed/<timestamp>.jsonl.
+Reads new dictation records from every data/inbox/wispr-flow-delta*.jsonl,
+embeds only the ones not already in Chroma, appends them to data/history.jsonl,
+and moves each inbox file to data/inbox/processed/<name>-<timestamp>.jsonl.
+
+Chip dictates from more than one Mac and each one pushes its own file, named
+for the machine and the moment (wispr-flow-delta-<host>-<stamp>.jsonl), so the
+inbox is a queue rather than a single slot. The glob also still matches the old
+fixed name, which is what makes the rollout order safe: this side can ship
+first and keep working while the Macs are still on the previous export.
 
 This is the incremental sibling of 05_embed.py. 05 rebuilds from scratch;
 07 only ever adds.
@@ -35,8 +41,9 @@ if ENV.exists():
 
 import config  # noqa: E402
 
-INBOX_FILE = config.DATA_DIR / "inbox" / "wispr-flow-delta.jsonl"
-PROCESSED_DIR = config.DATA_DIR / "inbox" / "processed"
+INBOX_DIR = config.DATA_DIR / "inbox"
+INBOX_GLOB = "wispr-flow-delta*.jsonl"
+PROCESSED_DIR = INBOX_DIR / "processed"
 COLLECTION_NAME = "voice_twin_v1"
 BATCH = 64
 
@@ -88,23 +95,31 @@ def append_to_history(new_records: list[dict]) -> None:
 
 
 def main() -> None:
-    if not INBOX_FILE.exists():
-        print(f"ERROR: {INBOX_FILE} not found. Nothing to do.")
+    files = sorted(p for p in INBOX_DIR.glob(INBOX_GLOB) if p.is_file())
+    if not files:
+        print(f"ERROR: no {INBOX_GLOB} in {INBOX_DIR}. Nothing to do.")
         sys.exit(2)
 
+    print(f"Inbox: {len(files)} delta file(s) to ingest")
+    for path in files:
+        print(f"\n--- {path.name} ---")
+        ingest_file(path)
+
+
+def ingest_file(inbox_file: Path) -> None:
     # Load delta records
     records: list[dict] = []
-    with INBOX_FILE.open() as f:
+    with inbox_file.open() as f:
         for line in f:
             line = line.strip()
             if not line:
                 continue
             records.append(json.loads(line))
-    print(f"Loaded {len(records):,} records from {INBOX_FILE.name}")
+    print(f"Loaded {len(records):,} records from {inbox_file.name}")
 
     if not records:
         print("Empty delta. Moving file to processed/ anyway.")
-        _archive(INBOX_FILE)
+        _archive(inbox_file)
         return
 
     # Open Chroma and get the set of ids already indexed
@@ -142,7 +157,7 @@ def main() -> None:
 
     if not eligible:
         print("No new rows to embed. Done.")
-        _archive(INBOX_FILE)
+        _archive(inbox_file)
         return
 
     embed, label = get_embedder()
@@ -178,7 +193,7 @@ def main() -> None:
     print(f"Embedded {added:,} new rows in {time.time() - t0:.1f}s")
     print(f"Chroma now has {after:,} vectors  (was {before:,}, +{after - before})")
 
-    _archive(INBOX_FILE)
+    _archive(inbox_file)
 
 
 def _archive(path: Path) -> None:
