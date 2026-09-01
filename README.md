@@ -44,6 +44,8 @@ python pipeline/08_visualize.py       # build the explorer graph
 ./cli/voice blog "the two voices: how I talk to AI vs how I talk to humans"
 ./cli/topics list
 ./cli/search "deploying to production"
+./cli/search --multi "how I explain my setup"   # LLM query variations + rank fusion
+./cli/lint draft.md                              # flag words you have never dictated
 ./cli/patterns list
 
 # Open the explorer
@@ -92,6 +94,13 @@ flow.sqlite (Wispr Flow source)
 cli/voice  <mode> "topic"   draft in your voice (slack/linkedin/blog/...)
 cli/topics list/show/find    browse the topical map
 cli/search "..."             semantic search across the corpus
+                             (--multi runs LLM query variations and fuses
+                             rankings; near-duplicates collapse by default)
+cli/lint <draft>             vocabulary check: flags words with zero corpus
+                             hits (never your voice), warns on rare ones.
+                             A blocklist catches known AI tells; this
+                             catches the unknown ones. Exit 1 on zero-hits,
+                             so it slots into any pre-publish gate
 cli/patterns list/show/suggest    find recurring instructions
 
 web/                         Next.js + sigma.js explorer at localhost:7300

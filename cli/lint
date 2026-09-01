@@ -1,0 +1,143 @@
+#!/usr/bin/env python3
+"""lint - check a draft's vocabulary against the corpus.
+
+Every word you have never dictated is, by definition, not your voice. A
+blocklist catches the known AI tells ("honestly", em dashes); this catches
+the unknown ones: any word in the draft that scores zero across the whole
+corpus gets flagged, rare words get a warning. Found in the wild when a
+reader spotted "quietly" as AI-generated: 0 hits in 39,000 dictations.
+
+Usage:
+    lint draft.md
+    lint --body "$(pbpaste)"
+    lint --min 5 draft.md         # warn under 5 corpus hits (default 5)
+    lint --json draft.md          # machine-readable, for the coach/CI
+
+Exit codes: 0 clean, 1 zero-hit words found. Warnings alone stay 0.
+
+Proper nouns, code blocks, URLs, and words the draft itself capitalizes are
+skipped: a post about a new product will always contain names the corpus
+has never heard, and that is not a tell.
+"""
+
+import argparse
+import json
+import re
+import sys
+import time
+from collections import Counter
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+
+HISTORY = ROOT / "data" / "history.jsonl"
+VOCAB_CACHE = ROOT / "data" / "vocab_counts.json"
+
+WORD_RE = re.compile(r"[a-zA-Z][a-zA-Z']+")
+MIN_LEN = 4
+
+
+def corpus_vocab() -> Counter:
+    """Word frequencies across every dictation, cached until history changes."""
+    if VOCAB_CACHE.exists() and VOCAB_CACHE.stat().st_mtime >= HISTORY.stat().st_mtime:
+        return Counter(json.loads(VOCAB_CACHE.read_text()))
+
+    sys.stderr.write("[lint] rebuilding vocabulary cache from history.jsonl...\n")
+    t0 = time.time()
+    counts = Counter()
+    with HISTORY.open() as f:
+        for line in f:
+            try:
+                text = json.loads(line).get("text") or ""
+            except json.JSONDecodeError:
+                continue
+            counts.update(w.lower() for w in WORD_RE.findall(text))
+    VOCAB_CACHE.write_text(json.dumps(dict(counts)))
+    sys.stderr.write(f"[lint] cached {len(counts)} words in {time.time() - t0:.1f}s\n")
+    return counts
+
+
+def strip_non_prose(text: str) -> str:
+    text = re.sub(r"^---\n.*?\n---\n", "", text, flags=re.S)  # frontmatter
+    text = re.sub(r"```.*?```", " ", text, flags=re.S)  # code blocks
+    text = re.sub(r"`[^`]*`", " ", text)  # inline code
+    text = re.sub(r"https?://\S+", " ", text)  # URLs
+    text = re.sub(r"!\[[^\]]*\]\([^)]*\)", " ", text)  # image refs
+    text = re.sub(r"\]\([^)]*\)", "]", text)  # link targets
+    return text
+
+
+def draft_words(text: str):
+    """Candidate words: lowercase prose words the draft never capitalizes."""
+    prose = strip_non_prose(text)
+    capitalized = {w.lower() for w in WORD_RE.findall(prose) if w[0].isupper()}
+    seen = {}
+    for w in WORD_RE.findall(prose):
+        lw = w.lower()
+        if len(lw) < MIN_LEN or w[0].isupper() or lw in capitalized:
+            continue
+        seen[lw] = seen.get(lw, 0) + 1
+    return seen
+
+
+def corpus_count(word: str, vocab: Counter) -> int:
+    """Count for the word or its obvious inflections: 'sleeps' counts as
+    'sleep'. Keeps morphology from flagging vocabulary you clearly use."""
+    if vocab.get(word, 0):
+        return vocab[word]
+    # "ly" is deliberately NOT here: saying "quiet" does not mean you say
+    # "quietly", and -ly adverbs are the single strongest AI-tell class.
+    candidates = []
+    for suffix in ("s", "es", "ed", "d", "ing"):
+        if word.endswith(suffix) and len(word) - len(suffix) >= 3:
+            stem = word[: -len(suffix)]
+            candidates += [stem, stem + "e"]
+            if len(stem) >= 2 and stem[-1] == stem[-2]:  # stopped -> stop, running -> run
+                candidates.append(stem[:-1])
+    return max((vocab.get(c, 0) for c in candidates), default=0)
+
+
+def main():
+    ap = argparse.ArgumentParser(prog="lint", description="Corpus vocabulary check for drafts")
+    ap.add_argument("file", nargs="?", help="Draft file (markdown or plain text)")
+    ap.add_argument("--body", help="Draft text passed inline instead of a file")
+    ap.add_argument("--min", type=int, default=5, help="Warn when corpus count is under N (default 5)")
+    ap.add_argument("--json", action="store_true", help="Emit JSON")
+    args = ap.parse_args()
+
+    if not args.file and not args.body:
+        ap.error("pass a file or --body")
+    text = args.body if args.body else Path(args.file).read_text()
+
+    vocab = corpus_vocab()
+    words = draft_words(text)
+
+    counts = {w: corpus_count(w, vocab) for w in words}
+    zero = sorted(w for w, c in counts.items() if c == 0)
+    rare = sorted((w, c) for w, c in counts.items() if 0 < c < args.min)
+
+    if args.json:
+        print(json.dumps({
+            "zero_hit": zero,
+            "rare": [{"word": w, "corpus_count": c} for w, c in rare],
+            "checked_words": len(words),
+        }, indent=2))
+        sys.exit(1 if zero else 0)
+
+    print(f"Checked {len(words)} distinct words against the corpus.")
+    if zero:
+        print(f"\nNEVER DICTATED ({len(zero)}) - not your voice, rewrite these:")
+        for w in zero:
+            print(f"  {w}")
+    if rare:
+        print(f"\nRARE (under {args.min} corpus hits) - double-check they sound like you:")
+        for w, c in rare:
+            print(f"  {w} ({c})")
+    if not zero and not rare:
+        print("Clean: every word is one you actually use.")
+    sys.exit(1 if zero else 0)
+
+
+if __name__ == "__main__":
+    main()

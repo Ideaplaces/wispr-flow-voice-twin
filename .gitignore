@@ -38,3 +38,6 @@ venv/
 .idea/
 *.swp
 .DS_Store
+
+# Corpus vocabulary cache built by cli/lint (personal dictation data)
+data/vocab_counts.json
