@@ -7,10 +7,17 @@ prints results ranked by similarity.
 
 Usage:
     search "terraform deploying sentry"
-    search -k 100 "everything I said about onboarding flows"
+    search -k 50 "everything I said about onboarding flows"
+    search --multi "how I explain my dev setup"      # LLM query variations + rank fusion
     search --ctx team_chat "discord notifications"   # restrict to one context
     search --since 2026-03-01 "azure key vault"      # restrict by date
     search --json "..."                              # machine-readable output
+
+Near-duplicate dictations (the same thought re-dictated across days) are
+collapsed by default so a bigger K surfaces new material instead of echoes;
+--no-dedup shows everything. --multi asks the configured LLM for a few
+paraphrases of the query, runs them all, and fuses the rankings (RRF), which
+catches dictations that phrase the idea differently than the query does.
 """
 
 import argparse
@@ -37,6 +44,54 @@ from config import CHROMA_DIR  # noqa: E402
 COLLECTION_NAME = "voice_twin_v1"
 
 
+def query_variations(query: str, n: int):
+    """Ask the configured LLM for n-1 paraphrases; the original is always first.
+
+    Retrieval is only as good as the query's wording, and a dictation corpus
+    phrases ideas the way they were spoken, not the way a query is typed.
+    Falls back to the original query alone if no LLM provider is reachable.
+    """
+    try:
+        import llm
+        prompt = (
+            "Rewrite the following search query {n} different ways for semantic "
+            "search over a corpus of spoken, dictated notes. Keep each variation "
+            "short, conversational, and focused on the same topic. Return one "
+            "variation per line, no numbering, nothing else.\n\nQuery: {q}"
+        ).format(n=n - 1, q=query)
+        out = llm.generate(
+            [{"role": "user", "content": prompt}], max_tokens=300, temperature=0.7
+        )
+        text = out[0] if isinstance(out, tuple) else out
+        variations = [v.strip() for v in text.splitlines() if v.strip()]
+        return [query] + variations[: n - 1]
+    except Exception as e:  # LLM offline, no keys, etc. Search still works.
+        sys.stderr.write(f"[multi] LLM unavailable ({e}); using the original query only\n")
+        return [query]
+
+
+def collapse_near_duplicates(rows, threshold=0.92):
+    """Drop rows whose text is nearly identical to an already-kept row."""
+    from difflib import SequenceMatcher
+
+    kept = []
+    for row in rows:
+        text = " ".join((row["text"] or "").lower().split())
+        duplicate = False
+        for other in kept:
+            if abs(len(text) - len(other["_norm"])) / max(len(text), len(other["_norm"]), 1) > 0.3:
+                continue
+            if SequenceMatcher(None, text, other["_norm"]).ratio() >= threshold:
+                duplicate = True
+                break
+        if not duplicate:
+            row["_norm"] = text
+            kept.append(row)
+    for row in kept:
+        del row["_norm"]
+    return kept
+
+
 def embed_query(query: str):
     provider = os.environ.get("EMBED_PROVIDER", "auto")
     if provider in ("azure", "auto") and os.environ.get("AZURE_OPENAI_API_KEY"):
@@ -58,7 +113,11 @@ def embed_query(query: str):
 def main():
     ap = argparse.ArgumentParser(prog="search", description="Semantic search across the voice corpus")
     ap.add_argument("query", help="Natural-language query")
-    ap.add_argument("-k", "--top", type=int, default=50, help="Number of results (default 50)")
+    ap.add_argument("-k", "--top", type=int, default=100, help="Number of results (default 100)")
+    ap.add_argument("--multi", nargs="?", const=4, type=int, metavar="N",
+                    help="Run N query variations (LLM paraphrases) and fuse rankings (default N=4)")
+    ap.add_argument("--no-dedup", action="store_true",
+                    help="Keep near-duplicate dictations instead of collapsing them")
     ap.add_argument("--ctx", help="Restrict to one context (ai_chat, team_chat, personal_chat, browser, other)")
     ap.add_argument("--since", help="Earliest date (YYYY-MM-DD)")
     ap.add_argument("--until", help="Latest date (YYYY-MM-DD)")
@@ -66,7 +125,13 @@ def main():
     ap.add_argument("--json", action="store_true", help="Emit JSON instead of pretty rows")
     args = ap.parse_args()
 
-    qemb = embed_query(args.query)
+    queries = [args.query]
+    if args.multi and args.multi > 1:
+        queries = query_variations(args.query, args.multi)
+        if len(queries) > 1:
+            sys.stderr.write("[multi] querying with:\n")
+            for q in queries:
+                sys.stderr.write(f"  - {q}\n")
 
     where = {}
     if args.ctx:
@@ -84,7 +149,10 @@ def main():
     chroma = chromadb.PersistentClient(path=str(CHROMA_DIR))
     coll = chroma.get_collection(COLLECTION_NAME)
 
-    kwargs = dict(query_embeddings=[qemb], n_results=args.top, include=["documents", "metadatas", "distances"])
+    # Over-fetch when collapsing near-duplicates so the final list still
+    # fills K with distinct material after the echoes are dropped.
+    fetch_n = args.top if args.no_dedup else min(args.top * 2, 500)
+    kwargs = dict(n_results=fetch_n, include=["documents", "metadatas", "distances"])
     if where:
         kwargs["where"] = where if len(where) > 1 else where
         # Chroma needs $and wrapping when there are multiple filters in some versions;
@@ -92,18 +160,39 @@ def main():
         if len(where) > 1:
             kwargs["where"] = {"$and": [{k: v} for k, v in where.items()]}
 
-    res = coll.query(**kwargs)
+    # One ranked list per query variation, fused with Reciprocal Rank Fusion:
+    # a dictation ranked well by several phrasings of the idea beats one that
+    # matched a single phrasing. With one query this reduces to plain top-K.
+    RRF_K = 60
+    by_id = {}
+    for q in queries:
+        res = coll.query(query_embeddings=[embed_query(q)], **kwargs)
+        for rank, (did, doc, meta, dist) in enumerate(
+            zip(res["ids"][0], res["documents"][0], res["metadatas"][0], res["distances"][0])
+        ):
+            row = by_id.setdefault(did, {
+                "id": did,
+                "sim": round(1.0 - float(dist), 4),
+                "ts": meta.get("ts", ""),
+                "ctx": meta.get("ctx", ""),
+                "n_words": meta.get("n_words", 0),
+                "text": doc,
+                "_rrf": 0.0,
+            })
+            row["_rrf"] += 1.0 / (RRF_K + rank + 1)
+            row["sim"] = max(row["sim"], round(1.0 - float(dist), 4))
 
-    rows = []
-    for did, doc, meta, dist in zip(res["ids"][0], res["documents"][0], res["metadatas"][0], res["distances"][0]):
-        rows.append({
-            "id": did,
-            "sim": round(1.0 - float(dist), 4),
-            "ts": meta.get("ts", ""),
-            "ctx": meta.get("ctx", ""),
-            "n_words": meta.get("n_words", 0),
-            "text": doc,
-        })
+    rows = sorted(by_id.values(), key=lambda r: r["_rrf"], reverse=True)
+    for row in rows:
+        del row["_rrf"]
+
+    if not args.no_dedup:
+        before = len(rows)
+        rows = collapse_near_duplicates(rows)
+        if len(rows) < before:
+            sys.stderr.write(f"[dedup] collapsed {before - len(rows)} near-duplicate dictations\n")
+
+    rows = rows[: args.top]
 
     if args.json:
         print(json.dumps({"query": args.query, "k": args.top, "results": rows}, ensure_ascii=False, indent=2))
