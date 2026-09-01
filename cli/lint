@@ -86,6 +86,11 @@ def corpus_count(word: str, vocab: Counter) -> int:
     'sleep'. Keeps morphology from flagging vocabulary you clearly use."""
     if vocab.get(word, 0):
         return vocab[word]
+    # Possessives are the noun, not a new word.
+    if word.endswith("'s"):
+        return corpus_count(word[:-2], vocab)
+    if word.endswith("'"):
+        return corpus_count(word[:-1], vocab)
     # "ly" is deliberately NOT here: saying "quiet" does not mean you say
     # "quietly", and -ly adverbs are the single strongest AI-tell class.
     candidates = []
