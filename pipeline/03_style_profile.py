@@ -24,6 +24,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 import config  # noqa: E402
+import corpus  # noqa: E402
 
 STOPWORDS = set("""
 a about above after again against all am an and any are aren as at be because been before being below
@@ -36,12 +37,11 @@ were weren what when where which while who whom why will with won would wouldn y
 yourselves re ve ll t s d m
 """.split())
 
-WORD_RE = re.compile(r"[A-Za-z][A-Za-z'\-]+")
 SENT_SPLIT = re.compile(r"(?<=[.!?])\s+(?=[A-Z])|\n+")
 
 
 def tokens(text):
-    return [w.lower() for w in WORD_RE.findall(text or "")]
+    return corpus.tokens(text)
 
 
 def sentences(text):
@@ -54,26 +54,29 @@ def main():
         sys.exit(2)
 
     per_ctx = defaultdict(lambda: {
-        "n": 0, "words": 0, "duration_s": 0.0, "edited": 0,
+        "n": 0, "words": 0, "spoken_words": 0, "duration_s": 0.0, "edited": 0,
         "word_counter": Counter(), "bigrams": Counter(), "trigrams": Counter(),
         "openers": Counter(), "closers": Counter(),
         "sentence_lengths": [], "para_breaks": [],
     })
     overall = Counter()
 
-    with config.HISTORY_JSONL.open() as f:
-        for line in f:
-            r = json.loads(line)
+    if True:
+        for r in corpus.load_history():
             if r["lang"] not in ("en", "engb", "unknown"):
                 continue
             ctx = r["ctx"]
             b = per_ctx[ctx]
             b["n"] += 1
             b["words"] += r["words"]
-            b["duration_s"] += r["duration_s"] or 0
+            if r.get("duration_s"):
+                # typed rows (WhatsApp, email) have no duration and must not
+                # inflate the words-per-minute figure
+                b["duration_s"] += r["duration_s"]
+                b["spoken_words"] += r["words"]
             if r["edited"]:
                 b["edited"] += 1
-            text = r["text"]
+            text = corpus.clean_text(corpus.index_text(r))
             toks = tokens(text)
             for w in toks:
                 overall[w] += 1
@@ -123,7 +126,7 @@ def main():
             "dictations": b["n"],
             "words": b["words"],
             "duration_seconds": round(b["duration_s"], 1),
-            "wpm": round(b["words"] * 60 / b["duration_s"], 1) if b["duration_s"] else 0,
+            "wpm": round(b["spoken_words"] * 60 / b["duration_s"], 1) if b["duration_s"] else 0,
             "edit_rate": round(b["edited"] / b["n"], 3) if b["n"] else 0,
             "sentence_length": {
                 "mean": round(sum(sl) / len(sl), 1),

@@ -82,11 +82,14 @@ def load_corpus() -> tuple[list[str], list[str], list[dict], np.ndarray]:
     n = collection.count()
     _print(f"Collection {COLLECTION_NAME!r} has {n} items, fetching")
 
-    res = collection.get(include=["documents", "metadatas", "embeddings"])
-    ids = res["ids"]
-    docs = res["documents"]
-    metas = res["metadatas"] or [{}] * len(ids)
-    embeddings = np.array(res["embeddings"], dtype=np.float32)
+    import corpus
+    ids, docs, metas, embs = [], [], [], []
+    for did, doc, meta, emb in corpus.iter_collection(collection, include=("documents", "metadatas", "embeddings")):
+        ids.append(did)
+        docs.append(doc)
+        metas.append(meta or {})
+        embs.append(emb)
+    embeddings = np.array(embs, dtype=np.float32)
 
     _print(f"Pulled {len(ids)} docs, embeddings shape {embeddings.shape}")
     return ids, docs, metas, embeddings

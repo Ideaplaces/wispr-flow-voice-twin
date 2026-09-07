@@ -25,6 +25,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 import config  # noqa: E402
+import corpus  # noqa: E402
 
 WORD_RE = re.compile(r"[A-Za-z']+|[.,;:!?\-—–\(\)\"\n]")
 
@@ -45,9 +46,16 @@ def main():
     word_deletes = Counter()
     rows = 0
 
-    with config.HISTORY_JSONL.open() as f:
-        for line in f:
-            r = json.loads(line)
+    # How often each lowercase word appears anywhere in the corpus. A real
+    # mishearing gets corrected most of the times it shows up; a common word
+    # that was swapped in two unrelated edits ("cloud" -> "claude") does not.
+    word_freq = Counter()
+    history = corpus.load_history()
+    for r in history:
+        word_freq.update(corpus.tokens(r.get("text") or ""))
+
+    if True:
+        for r in history:
             if not (r.get("formatted_text") and r.get("edited_text")):
                 continue
             f_txt, e_txt = r["formatted_text"], r["edited_text"]
@@ -112,10 +120,12 @@ def main():
 
     glossary = {}
     for (a, b), n in word_swaps.most_common(500):
-        if n < 2:
+        if n < 3:
             continue
         if not acceptable(a, b):
             continue
+        if word_freq.get(a.lower(), 0) > 5 * n:
+            continue  # the 'wrong' form is a word in its own right
         glossary[a] = {"correct_to": b, "frequency": n}
 
     rules = {

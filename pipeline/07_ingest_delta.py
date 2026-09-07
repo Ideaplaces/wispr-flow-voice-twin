@@ -40,6 +40,7 @@ if ENV.exists():
         os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
 
 import config  # noqa: E402
+import corpus  # noqa: E402
 
 INBOX_DIR = config.DATA_DIR / "inbox"
 INBOX_GLOB = "wispr-flow-delta*.jsonl"
@@ -129,9 +130,27 @@ def ingest_file(inbox_file: Path) -> None:
     before = coll.count()
     print(f"Chroma {COLLECTION_NAME!r} currently has {before:,} vectors")
 
-    # Pull existing ids in chunks (Chroma .get() with no ids returns everything)
-    existing_ids = set(coll.get(include=[])["ids"])
+    existing_ids = corpus.collection_ids(coll)
     print(f"  cached {len(existing_ids):,} existing ids for dedupe")
+
+    # A delta that overlaps an earlier one (rsync retry, second Mac) must not
+    # append the same row twice: history.jsonl feeds the style profile and lint.
+    known = corpus.history_ids()
+    fresh = []
+    seen_in_delta: set[str] = set()
+    for r in records:
+        if r["id"] in known or r["id"] in seen_in_delta:
+            continue
+        seen_in_delta.add(r["id"])
+        fresh.append(r)
+    if len(fresh) < len(records):
+        print(f"  {len(records) - len(fresh)} rows already in history.jsonl, not appended again")
+    records = fresh
+
+    glossary = corpus.load_glossary()
+    for r in records:
+        corpus.enrich(r, glossary)
+    label_new_rows(records)
 
     # Decide which delta rows are new AND eligible for indexing
     eligible: list[dict] = []
@@ -151,8 +170,9 @@ def ingest_file(inbox_file: Path) -> None:
     print(f"  {len(eligible):,} eligible to embed "
           f"(skipped {skipped_dupes} dupes, {skipped_short} short fragments)")
 
-    # Append the entire delta to history.jsonl regardless of indexing eligibility
-    append_to_history(records)
+    # Append the new rows to history.jsonl regardless of indexing eligibility
+    if records:
+        append_to_history(records)
     print(f"Appended {len(records):,} rows to {config.HISTORY_JSONL.name}")
 
     if not eligible:
@@ -167,22 +187,13 @@ def ingest_file(inbox_file: Path) -> None:
     added = 0
     for i in range(0, len(eligible), BATCH):
         chunk = eligible[i:i + BATCH]
-        texts = [c["text"] for c in chunk]
+        texts = [corpus.index_text(c) for c in chunk]
         embs = embed(texts)
-        coll.add(
+        coll.upsert(
             ids=[c["id"] for c in chunk],
             embeddings=embs,
             documents=texts,
-            metadatas=[
-                {
-                    "ctx": c.get("ctx") or "other",
-                    "app": c.get("app") or "",
-                    "ts": (c.get("ts") or "")[:10],
-                    "edited": bool(c.get("edited")),
-                    "n_words": c.get("words") or 0,
-                }
-                for c in chunk
-            ],
+            metadatas=[corpus.build_metadata(c) for c in chunk],
         )
         added += len(chunk)
         elapsed = time.time() - t0
@@ -194,6 +205,22 @@ def ingest_file(inbox_file: Path) -> None:
     print(f"Chroma now has {after:,} vectors  (was {before:,}, +{after - before})")
 
     _archive(inbox_file)
+
+
+def label_new_rows(records: list[dict]) -> None:
+    """Give human-facing rows the rules could not label a kind via the model.
+    CLASSIFY_LLM=0 keeps the ingest fully offline (those rows stay 'other')."""
+    pending = [r for r in records if r.get("human") and not r.get("kind")]
+    if not pending:
+        return
+    if os.environ.get("CLASSIFY_LLM", "1") == "0":
+        for r in pending:
+            r["kind"] = "other"
+        return
+    labels = corpus.classify_kinds_llm([r["text"] for r in pending])
+    for r, label in zip(pending, labels):
+        r["kind"] = label
+    print(f"  labelled {len(pending)} human-facing rows via the model")
 
 
 def _archive(path: Path) -> None:

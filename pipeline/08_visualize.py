@@ -71,11 +71,14 @@ def load_corpus():
     _print(f"Opening Chroma at {CHROMA_DIR}")
     client = chromadb.PersistentClient(path=str(CHROMA_DIR))
     coll = client.get_collection(COLLECTION_NAME)
-    res = coll.get(include=["embeddings", "documents", "metadatas"])
-    ids = res["ids"]
-    docs = res["documents"]
-    metas = res["metadatas"] or [{}] * len(ids)
-    embs = np.array(res["embeddings"], dtype=np.float32)
+    import corpus
+    ids, docs, metas, rows = [], [], [], []
+    for did, doc, meta, emb in corpus.iter_collection(coll, include=("documents", "metadatas", "embeddings")):
+        ids.append(did)
+        docs.append(doc)
+        metas.append(meta or {})
+        rows.append(emb)
+    embs = np.array(rows, dtype=np.float32)
     _print(f"Pulled {len(ids):,} docs, embeddings shape {embs.shape}")
     return ids, docs, metas, embs
 

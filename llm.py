@@ -204,6 +204,15 @@ def _resolve_provider() -> str:
     )
 
 
+def _provider_kwargs(provider: str, kwargs: dict) -> dict:
+    """Callers name the model as `deployment` (Azure) or `model` (everyone else);
+    hand each provider the one it takes, under the name it takes."""
+    chosen = kwargs.get("deployment") or kwargs.get("model")
+    if not chosen:
+        return {}
+    return {"deployment": chosen} if provider == "azure" else {"model": chosen}
+
+
 def generate(messages, max_tokens=1200, temperature=0.7, **kwargs):
     """Run a chat completion through whichever provider is configured."""
     provider = _resolve_provider()
@@ -216,6 +225,7 @@ def generate(messages, max_tokens=1200, temperature=0.7, **kwargs):
     fn = fn_map.get(provider)
     if fn is None:
         raise RuntimeError(f"Unknown LLM_PROVIDER {provider!r}")
+    kwargs = _provider_kwargs(provider, kwargs)
     try:
         return fn(messages, max_tokens=max_tokens, temperature=temperature, **kwargs)
     except Exception as e:
@@ -228,7 +238,8 @@ def generate(messages, max_tokens=1200, temperature=0.7, **kwargs):
                 continue
             try:
                 if check():
-                    return alt_fn(messages, max_tokens=max_tokens, temperature=temperature, **kwargs)
+                    return alt_fn(messages, max_tokens=max_tokens, temperature=temperature,
+                                  **_provider_kwargs(name, kwargs))
             except Exception:
                 continue
         raise

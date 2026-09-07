@@ -31,6 +31,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+import corpus  # noqa: E402
+
 HISTORY = ROOT / "data" / "history.jsonl"
 VOCAB_CACHE = ROOT / "data" / "vocab_counts.json"
 
@@ -46,13 +48,13 @@ def corpus_vocab() -> Counter:
     sys.stderr.write("[lint] rebuilding vocabulary cache from history.jsonl...\n")
     t0 = time.time()
     counts = Counter()
-    with HISTORY.open() as f:
-        for line in f:
-            try:
-                text = json.loads(line).get("text") or ""
-            except json.JSONDecodeError:
-                continue
-            counts.update(w.lower() for w in WORD_RE.findall(text))
+    for rec in corpus.load_history(HISTORY):
+        counts.update(w.lower() for w in WORD_RE.findall(corpus.index_text(rec)))
+    # A misheard name is not a word you say. 'mentally' has 968 hits and
+    # nearly all of them were Mentorly.
+    for wrong in corpus.load_glossary():
+        if " " not in wrong:
+            counts.pop(wrong, None)
     VOCAB_CACHE.write_text(json.dumps(dict(counts)))
     sys.stderr.write(f"[lint] cached {len(counts)} words in {time.time() - t0:.1f}s\n")
     return counts
