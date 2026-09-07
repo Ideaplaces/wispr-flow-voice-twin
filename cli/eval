@@ -1,0 +1,137 @@
+#!/usr/bin/env python3
+"""eval - measure what the writer's retrieval hands the model.
+
+Runs a fixed set of requests through the same retrieval the twin uses and
+scores the result on the things that went wrong before:
+
+  human_share   share of cadence rows written to a person (not to an AI tool)
+  kind_match    share of cadence rows whose kind matches the requested kind
+  lang_purity   share of cadence rows in the requested language
+  neardup_rate  share of cadence rows that near-duplicate an earlier row
+  noun_recall   share of grounding rows (the facts leg) that contain the proper
+                nouns the request names; noun_recall_cadence reports the same
+                for the cadence leg, where names are rare by design
+
+Usage:
+    eval                                  # data/eval/queries.json
+    eval --queries eval/queries.example.json
+    eval --json > after.json
+    eval --baseline before.json           # print the delta per metric
+    eval --min-human 0.8 --min-noun 0.6   # exit 1 under a threshold (CI gate)
+
+Query file: {"queries": [{"mode": "slack", "query": "...", "terms": ["kalitravel"]}, ...]}
+`terms` are lowercase substrings expected in the retrieved text; leave empty
+for requests that name nobody.
+"""
+
+import argparse
+import json
+import statistics
+import sys
+from difflib import SequenceMatcher
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+
+import corpus  # noqa: E402  (loads .env before config reads it)
+import config  # noqa: E402
+from agent import twin  # noqa: E402
+
+DEFAULT_QUERIES = config.DATA_DIR / "eval" / "queries.json"
+METRICS = ("human_share", "kind_match", "lang_purity", "neardup_rate", "noun_recall", "noun_recall_cadence")
+
+
+def near_dup_rate(texts: list[str]) -> float:
+    if not texts:
+        return 0.0
+    dups = 0
+    for i, t in enumerate(texts):
+        if any(SequenceMatcher(None, t.lower(), u.lower()).ratio() > 0.85 for u in texts[:i]):
+            dups += 1
+    return dups / len(texts)
+
+
+def score_query(item: dict, k: int, langs: set[str]) -> dict:
+    bundle = twin.retrieve_for_mode(item["mode"], item["query"], k)
+    cadence, grounding = bundle["cadence"], bundle["grounding"]
+    metas = [h["meta"] for h in cadence]
+    texts = [h["doc"] for h in cadence]
+    out = {
+        "query": item["query"], "mode": item["mode"], "kind": bundle["kind"],
+        "n_cadence": len(cadence), "n_grounding": len(grounding),
+        "human_share": (sum(1 for m in metas if m.get("human")) / len(metas)) if metas else 0.0,
+        "lang_purity": (sum(1 for m in metas if m.get("lang") in langs) / len(metas)) if metas else 0.0,
+        "neardup_rate": near_dup_rate(texts),
+    }
+    if bundle["kind"] and bundle["kind"] not in ("other", "instruction") and metas:
+        out["kind_match"] = sum(1 for m in metas if m.get("kind") == bundle["kind"]) / len(metas)
+    terms = [t.lower() for t in item.get("terms") or []]
+    if terms:
+        def recall(hits):
+            pool = [h["doc"].lower() for h in hits]
+            return (sum(1 for d in pool if all(t in d for t in terms)) / len(pool)) if pool else 0.0
+        out["noun_recall"] = recall(grounding)
+        out["noun_recall_cadence"] = recall(cadence)
+    return out
+
+
+def aggregate(rows: list[dict]) -> dict:
+    agg = {}
+    for m in METRICS:
+        vals = [r[m] for r in rows if m in r]
+        agg[m] = round(statistics.mean(vals), 3) if vals else None
+    agg["queries"] = len(rows)
+    return agg
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(prog="eval", description="Retrieval quality check for the voice twin")
+    ap.add_argument("--queries", default=str(DEFAULT_QUERIES), help="Query set (JSON)")
+    ap.add_argument("-k", type=int, default=config.RETRIEVE_K, help="Cadence rows per request")
+    ap.add_argument("--lang", default="en", help="Language the requests are in (default en)")
+    ap.add_argument("--json", action="store_true", help="Emit the full report as JSON")
+    ap.add_argument("--baseline", metavar="FILE", help="Earlier --json report to diff against")
+    ap.add_argument("--min-human", type=float, help="Fail under this human_share")
+    ap.add_argument("--min-noun", type=float, help="Fail under this noun_recall")
+    ap.add_argument("--max-dup", type=float, help="Fail over this neardup_rate")
+    args = ap.parse_args()
+
+    items = json.loads(Path(args.queries).read_text())["queries"]
+    langs = {args.lang, "engb", "unknown"} if args.lang == "en" else {args.lang}
+    rows = [score_query(it, args.k, langs) for it in items]
+    agg = aggregate(rows)
+    report = {"aggregate": agg, "per_query": rows}
+
+    if args.json:
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+    else:
+        print(f"{agg['queries']} requests, k={args.k}")
+        baseline = json.loads(Path(args.baseline).read_text())["aggregate"] if args.baseline else None
+        for m in METRICS:
+            v = agg[m]
+            line = f"  {m:13s} {v if v is not None else 'n/a':>6}"
+            if baseline and baseline.get(m) is not None and v is not None:
+                line += f"   (baseline {baseline[m]:.3f}, {v - baseline[m]:+.3f})"
+            print(line)
+        weak = [r for r in rows if r["human_share"] < 1.0 or r.get("noun_recall", 1.0) < 0.5]
+        if weak:
+            print("\nRequests to look at:")
+            for r in weak:
+                print(f"  human={r['human_share']:.2f} noun={r.get('noun_recall', float('nan')):.2f} "
+                      f"kind={r['kind']}: {r['query'][:80]}")
+
+    failed = []
+    if args.min_human is not None and (agg["human_share"] or 0) < args.min_human:
+        failed.append("human_share")
+    if args.min_noun is not None and (agg["noun_recall"] or 0) < args.min_noun:
+        failed.append("noun_recall")
+    if args.max_dup is not None and (agg["neardup_rate"] or 0) > args.max_dup:
+        failed.append("neardup_rate")
+    if failed:
+        sys.stderr.write(f"eval: below threshold on {', '.join(failed)}\n")
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

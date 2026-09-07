@@ -60,62 +60,65 @@ def load_artifacts():
 
 # ---------------------------------------------------------------------------
 # Retrieval
+#
+# Two questions, two lookups. "How does the user write this kind of message
+# to a person" is answered from human-facing rows of the same kind and
+# language (cadence). "What has the user said about this topic" is answered
+# from every context (grounding), and is shown to the model as facts only.
+# One topic-similarity lookup used to serve both, and since 83% of the corpus
+# is instructions to an AI tool, the cadence reference was mostly Cursor talk.
 # ---------------------------------------------------------------------------
 
+import corpus  # noqa: E402
+import retrieval  # noqa: E402
 
-def get_embedder():
-    provider = config.EMBED_PROVIDER
-    if provider == "auto":
-        provider = "azure" if (config.AZURE_OPENAI_API_KEY and config.AZURE_OPENAI_ENDPOINT) else "local"
-
-    if provider == "azure":
-        from openai import AzureOpenAI
-        client = AzureOpenAI(
-            azure_endpoint=config.AZURE_OPENAI_ENDPOINT,
-            api_key=config.AZURE_OPENAI_API_KEY,
-            api_version=config.AZURE_OPENAI_API_VERSION,
-        )
-
-        def embed(texts):
-            r = client.embeddings.create(
-                input=texts, model=config.AZURE_OPENAI_EMBEDDING_DEPLOYMENT)
-            return [d.embedding for d in r.data]
-
-        return embed
-
-    from sentence_transformers import SentenceTransformer
-    model = SentenceTransformer(config.LOCAL_EMBED_MODEL)
-
-    def embed(texts):
-        return model.encode(texts, normalize_embeddings=True).tolist()
-
-    return embed
+LONG_FORM_MODES = {"blog", "rewrite", "linkedin", "twitter"}
+CADENCE_RECENCY = float(os.environ.get("CADENCE_RECENCY", "0.5"))
+GROUNDING_RECENCY = float(os.environ.get("GROUNDING_RECENCY", "0.2"))
 
 
-def retrieve(query: str, target_ctx: str, k: int = None):
-    import chromadb
+def _langs() -> list[str]:
+    lang = os.environ.get("VOICE_LANG", "en").lower()
+    return [lang, "engb", "unknown"] if lang == "en" else [lang]
+
+
+def _as_hit(row: dict, role: str) -> dict:
+    return {"id": row["id"], "doc": row["text"], "meta": row["meta"], "sim": row["sim"],
+            "sources": row.get("sources", []), "role": role}
+
+
+def retrieve_for_mode(mode: str, topic: str, k: int = None) -> dict:
     k = k or config.RETRIEVE_K
-    embed = get_embedder()
-    q_emb = embed([query])[0]
+    langs = _langs()
+    kind = None
+    if mode in LONG_FORM_MODES:
+        cadence = retrieval.search(topic, k=k, human=True, lang=langs, min_words=25,
+                                   recency=CADENCE_RECENCY)
+    else:
+        kind = corpus.request_kind(topic)
+        kinds = [kind] if kind not in (None, "other", "instruction") else None
+        cadence = retrieval.search(topic, k=k, human=True, lang=langs, kinds=kinds,
+                                   recency=CADENCE_RECENCY)
+        if kinds and len(cadence) < k:
+            seen = {r["id"] for r in cadence}
+            widen = retrieval.search(topic, k=k, human=True, lang=langs, recency=CADENCE_RECENCY)
+            cadence += [r for r in widen if r["id"] not in seen][: k - len(cadence)]
+    seen = {r["id"] for r in cadence}
+    grounding = [r for r in retrieval.search(topic, k=max(4, k // 2) + len(seen), lang=langs,
+                                             recency=GROUNDING_RECENCY) if r["id"] not in seen]
+    grounding = grounding[: max(4, k // 2)]
+    return {
+        "kind": kind,
+        "cadence": [_as_hit(r, "cadence") for r in cadence],
+        "grounding": [_as_hit(r, "grounding") for r in grounding],
+    }
 
-    client = chromadb.PersistentClient(path=str(config.CHROMA_DIR))
-    coll = client.get_collection("voice_twin_v1")
 
-    # Pull a generous pool, then re-rank with the same-context bias.
-    pool = coll.query(query_embeddings=[q_emb], n_results=max(50, k * 6))
-    docs = pool["documents"][0]
-    metas = pool["metadatas"][0]
-    dists = pool["distances"][0]
-
-    scored = []
-    for doc, meta, dist in zip(docs, metas, dists):
-        sim = 1 - dist
-        ctx_match = meta.get("ctx") == target_ctx
-        adjusted = sim + (config.SAME_CONTEXT_BIAS if ctx_match else 0) * 0.05
-        scored.append({"doc": doc, "meta": meta, "sim": sim, "adjusted": adjusted})
-
-    scored.sort(key=lambda r: r["adjusted"], reverse=True)
-    return scored[:k]
+def retrieve(query: str, target_ctx: str = "team_chat", k: int = None):
+    """Compatibility shim: cadence rows for a query, human-facing only."""
+    return [_as_hit(r, "cadence") for r in retrieval.search(query, k=k or config.RETRIEVE_K,
+                                                              human=True, lang=_langs(),
+                                                              recency=CADENCE_RECENCY)]
 
 
 # ---------------------------------------------------------------------------
@@ -163,13 +166,13 @@ def edit_rules_summary(edit_rules):
     return "\n".join(rules)
 
 
-def glossary_summary(glossary, max_entries=15):
+def glossary_summary(glossary: dict, max_entries=30):
+    """glossary is wrong -> correct, the profile entries first (see corpus.load_glossary)."""
     if not glossary:
         return ""
-    items = sorted(glossary.items(), key=lambda kv: -kv[1]["frequency"])[:max_entries]
     lines = ["Proper-noun glossary (always use the right-hand spelling):"]
-    for wrong, info in items:
-        lines.append(f"  '{wrong}' -> '{info['correct_to']}'")
+    for wrong, correct in list(glossary.items())[:max_entries]:
+        lines.append(f"  '{wrong}' -> '{correct}'")
     return "\n".join(lines)
 
 
@@ -187,14 +190,20 @@ def build_messages(mode: str, topic: str, retrieved=None, body: str = None):
 
     template = load_prompt(mode)
 
-    examples_block = ""
-    if retrieved:
+    def render_hits(hits):
         items = []
-        for i, hit in enumerate(retrieved, 1):
-            ts = hit["meta"].get("ts", "")
-            ctx = hit["meta"].get("ctx", "")
-            items.append(f"[{i}] ({ctx} {ts}) sim={hit['sim']:.2f}\n{hit['doc']}\n")
-        examples_block = "\n".join(items)
+        for i, hit in enumerate(hits, 1):
+            meta = hit["meta"]
+            label = " ".join(x for x in (meta.get("source", ""), meta.get("ctx", ""), meta.get("kind", ""),
+                                         meta.get("ts", "")) if x)
+            items.append(f"[{i}] ({label})\n{hit['doc']}\n")
+        return "\n".join(items)
+
+    retrieved = retrieved or []
+    cadence = [h for h in retrieved if h.get("role", "cadence") == "cadence"]
+    grounding = [h for h in retrieved if h.get("role") == "grounding"]
+    examples_block = render_hits(cadence)
+    grounding_block = render_hits(grounding)
 
     profile = load_profile()
     system = profile.render(
@@ -205,8 +214,9 @@ def build_messages(mode: str, topic: str, retrieved=None, body: str = None):
             # The static profile glossary already lives at {{glossary}}, but if
             # the auto-generated glossary.json artifact exists, prefer it: it's
             # frequency-weighted from the user's actual transcription edits.
-            "glossary": glossary_summary(glossary) or _format_profile_glossary(profile),
-            "examples": examples_block or "(no past dictations retrieved)",
+            "glossary": glossary_summary(corpus.load_glossary()) or _format_profile_glossary(profile),
+            "examples": examples_block or "(no past messages retrieved)",
+            "grounding": grounding_block or "(nothing retrieved on this topic)",
         },
     )
 
@@ -260,17 +270,16 @@ DASH_PATTERNS = [
 ]
 
 
-def post_process(text: str, glossary: dict) -> str:
+def post_process(text: str, glossary: dict | None = None) -> str:
     # Strip em / en dashes
     for pat, repl in DASH_PATTERNS:
         text = pat.sub(repl, text)
-    # Apply glossary substitutions (case-insensitive whole-word match)
-    for wrong, info in glossary.items():
-        if not wrong:
-            continue
-        pattern = re.compile(rf"\b{re.escape(wrong)}\b", flags=re.IGNORECASE)
-        text = pattern.sub(info["correct_to"], text)
-    return text.strip()
+    # Proper nouns: the merged glossary (profile first), whole words only. The
+    # raw auto-glossary used to be applied here and turned "Cloud Run" into
+    # "claude Run" on every draft.
+    if glossary is None:
+        glossary = corpus.load_glossary()
+    return corpus.normalize_text(text, glossary).strip()
 
 
 # ---------------------------------------------------------------------------
@@ -281,21 +290,15 @@ def post_process(text: str, glossary: dict) -> str:
 def speak(mode: str, topic: str, body: str = None, k: int = None,
           deployment: str = None, max_tokens: int = 1500):
     """Generate a Chip-flavored draft for the given mode."""
-    target_ctx = {"slack": "team_chat", "linkedin": "team_chat",
-                  "twitter": "team_chat", "blog": "ai_chat",
-                  "rewrite": "ai_chat",
-                  "email": "team_chat", "coach": "ai_chat"}.get(mode, "team_chat")
+    retrieved = []
     if config.CHROMA_DIR.exists():
         try:
-            retrieved = retrieve(topic, target_ctx, k)
+            bundle = retrieve_for_mode(mode, topic, k)
+            retrieved = bundle["cadence"] + bundle["grounding"]
         except Exception as e:
             print(f"(retrieval skipped: {e})", file=sys.stderr)
-            retrieved = []
-    else:
-        retrieved = []
 
     messages = build_messages(mode, topic, retrieved=retrieved, body=body)
     out, source = generate(messages, deployment=deployment, max_tokens=max_tokens)
-    _, _, glossary = load_artifacts()
-    out = post_process(out, glossary)
+    out = post_process(out)
     return out, source, retrieved

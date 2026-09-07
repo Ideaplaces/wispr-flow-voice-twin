@@ -30,10 +30,15 @@ EDIT RULES (literal patterns {{name}} applies when polishing AI-formatted text)
 GLOSSARY
 {{glossary}}
 
-PAST DICTATIONS BY {{name}}, RETRIEVED FOR THIS TOPIC
+MESSAGES {{name}} WROTE TO PEOPLE, RETRIEVED FOR THIS TOPIC (the cadence reference: same kind of message where possible)
 Use as cadence reference. Match the clipped, decisive rhythm.
 
 {{examples}}
+
+WHAT {{name}} HAS SAID ABOUT THIS TOPIC (any context, including instructions to AI tools)
+Use only for facts, names, and vocabulary. Do not borrow the tone: these were spoken to a tool, not to a person.
+
+{{grounding}}
 
 USER'S REQUEST
 The user message is the topic. Pick single-tweet vs thread based on what the topic warrants. If unsure, default to a 6-post thread.

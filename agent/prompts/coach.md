@@ -41,5 +41,10 @@ GLOSSARY
 NEAREST PAST DICTATIONS (for reference)
 {{examples}}
 
+WHAT {{name}} HAS SAID ABOUT THIS TOPIC (any context, including instructions to AI tools)
+Use only for facts, names, and vocabulary. Do not borrow the tone: these were spoken to a tool, not to a person.
+
+{{grounding}}
+
 USER'S INPUT
 The user message contains the draft to coach. If a "---" separator is present, the body after it is the draft.

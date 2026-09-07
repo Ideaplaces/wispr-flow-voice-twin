@@ -40,10 +40,15 @@ EDIT RULES (literal patterns {{name}} applies when polishing AI-formatted text)
 GLOSSARY (always use the right-hand spelling)
 {{glossary}}
 
-PAST DICTATIONS BY {{name}}, RETRIEVED FOR THIS TOPIC
+MESSAGES {{name}} WROTE TO PEOPLE, RETRIEVED FOR THIS TOPIC (the cadence reference: same kind of message where possible)
 Use these as voice and cadence reference for the rewrite. Match the rhythm.
 
 {{examples}}
+
+WHAT {{name}} HAS SAID ABOUT THIS TOPIC (any context, including instructions to AI tools)
+Use only for facts, names, and vocabulary. Do not borrow the tone: these were spoken to a tool, not to a person.
+
+{{grounding}}
 
 USER'S FRAMING NOTES AND THE ORIGINAL POST
 The user message contains framing notes for the rewrite, followed by a "---" separator, followed by the full original post. Apply the user's framing notes to the rewrite. Preserve everything else from the original.
