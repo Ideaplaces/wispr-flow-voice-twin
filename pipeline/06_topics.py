@@ -52,6 +52,12 @@ TOPICS_DIR = DATA_DIR / "topics"
 TOPICS_DIR.mkdir(parents=True, exist_ok=True)
 
 MIN_CLUSTER_SIZE = int(os.environ.get("TOPIC_MIN_CLUSTER_SIZE", "40"))
+# Cap on one cluster as a share of the corpus. HDBSCAN's excess-of-mass
+# selection happily returns one cluster holding 97% of the rows when a dense,
+# distinct blob exists next to the main mass (the Romanian WhatsApp rows did
+# exactly that on 2026-09-07: 2 clusters, then c-TF-IDF failed). Forcing the
+# giant cluster to split restores the ~110-topic map.
+MAX_CLUSTER_SHARE = float(os.environ.get("TOPIC_MAX_CLUSTER_SHARE", "0.10"))
 UMAP_NEIGHBORS = int(os.environ.get("TOPIC_UMAP_NEIGHBORS", "15"))
 UMAP_COMPONENTS = int(os.environ.get("TOPIC_UMAP_COMPONENTS", "5"))
 LLM_LABELS = os.environ.get("TOPIC_LLM_LABELS", "0") == "1"
@@ -95,7 +101,7 @@ def load_corpus() -> tuple[list[str], list[str], list[dict], np.ndarray]:
     return ids, docs, metas, embeddings
 
 
-def build_model() -> BERTopic:
+def build_model(n_docs: int = 0, min_df: int = 5) -> BERTopic:
     """Configure UMAP + HDBSCAN + vectorizer, return an unfit BERTopic."""
     sklearn_stopwords = list(
         CountVectorizer(stop_words="english").get_stop_words() | EXTRA_STOPWORDS
@@ -111,13 +117,14 @@ def build_model() -> BERTopic:
     )
     hdbscan_model = HDBSCAN(
         min_cluster_size=MIN_CLUSTER_SIZE,
+        max_cluster_size=int(n_docs * MAX_CLUSTER_SHARE) if n_docs else 0,
         metric="euclidean",
         cluster_selection_method="eom",
         prediction_data=True,
     )
     vectorizer_model = CountVectorizer(
         stop_words=sklearn_stopwords,
-        min_df=5,
+        min_df=min_df,
         ngram_range=(1, 2),
     )
 
@@ -249,8 +256,16 @@ def print_summary(model: BERTopic, llm_labels: dict[int, str], top_n: int = 30) 
 
 def main() -> None:
     ids, docs, metas, embeddings = load_corpus()
-    model = build_model()
-    topics = fit_topics(model, docs, embeddings)
+    model = build_model(n_docs=len(docs))
+    try:
+        topics = fit_topics(model, docs, embeddings)
+    except ValueError as e:
+        # Fewer topics than min_df documents for the keyword vectorizer: the
+        # clustering collapsed. Refit with a permissive vectorizer so the run
+        # still lands a model and the log shows the shape of the problem.
+        _print(f"c-TF-IDF failed ({e}); refitting with min_df=1")
+        model = build_model(n_docs=len(docs), min_df=1)
+        topics = fit_topics(model, docs, embeddings)
     llm_labels = maybe_llm_label(model, top_n=LLM_MAX)
     write_artifacts(model, ids, docs, metas, topics, llm_labels)
     print_summary(model, llm_labels)
