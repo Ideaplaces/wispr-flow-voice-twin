@@ -1,0 +1,14 @@
+{
+  "queries": [
+    {"mode": "slack", "query": "tell the team I'm pushing the fix today and the tests are green", "terms": []},
+    {"mode": "slack", "query": "reply that the PR is merged and the next step is the preview page", "terms": []},
+    {"mode": "email", "query": "message to Acme about the pricing, a monthly fee plus a percentage on bookings", "terms": ["acme"]},
+    {"mode": "slack", "query": "no worries, I'll take a look at the deploy tomorrow morning", "terms": []},
+    {"mode": "email", "query": "thanks for the intro, let's book 15 minutes next week", "terms": []},
+    {"mode": "email", "query": "decline the meeting politely, I'm travelling that week", "terms": []},
+    {"mode": "slack", "query": "good morning, quick status: staging is up, production deploy after lunch", "terms": []},
+    {"mode": "linkedin", "query": "why I run all my dev work on a cloud VM instead of my laptop", "terms": []},
+    {"mode": "slack", "query": "I'm off this afternoon, back online tonight", "terms": []},
+    {"mode": "email", "query": "follow up with the cohort about the office hours slot", "terms": []}
+  ]
+}

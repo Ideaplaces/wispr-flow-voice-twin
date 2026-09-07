@@ -23,8 +23,13 @@ EDIT RULES
 GLOSSARY
 {{glossary}}
 
-PAST DICTATIONS BY {{name}}, RETRIEVED FOR THIS TOPIC
+MESSAGES {{name}} WROTE TO PEOPLE, RETRIEVED FOR THIS TOPIC (the cadence reference: same kind of message where possible)
 {{examples}}
+
+WHAT {{name}} HAS SAID ABOUT THIS TOPIC (any context, including instructions to AI tools)
+Use only for facts, names, and vocabulary. Do not borrow the tone: these were spoken to a tool, not to a person.
+
+{{grounding}}
 
 USER'S REQUEST
 The user message is either the topic or the thread to reply to. If a body is included after a "---" separator, treat it as the thread to reply to. Produce the reply only.
