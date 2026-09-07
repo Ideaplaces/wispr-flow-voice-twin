@@ -70,7 +70,8 @@ def is_human(rec: dict) -> bool:
 # Text cleaning
 # ---------------------------------------------------------------------------
 
-HTML_TAG_RE = re.compile(r"</?[a-zA-Z][^<>]*>")
+HTML_TAG_RE = re.compile(r"</?[a-zA-Z][^<>]*>|<![^<>]*>")
+HTML_BLOCK_RE = re.compile(r"<(style|script|head)\b[^>]*>.*?</\1\s*>", re.I | re.S)
 BOM = "﻿"
 WORD_RE = re.compile(r"[^\W\d_](?:[^\W\d_]|['’\-])*", re.UNICODE)
 
@@ -79,7 +80,8 @@ def strip_html(text: str) -> str:
     """Drop markup that Slack and rich-text editors leak into dictations."""
     if not text or ("<" not in text and "&" not in text):
         return text
-    out = re.sub(r"<br\s*/?>|</p>|</li>|</div>", "\n", text, flags=re.I)
+    out = HTML_BLOCK_RE.sub(" ", text)
+    out = re.sub(r"<br\s*/?>|</p>|</li>|</div>", "\n", out, flags=re.I)
     out = HTML_TAG_RE.sub("", out)
     out = html.unescape(out)
     out = re.sub(r"[ \t]+", " ", out)

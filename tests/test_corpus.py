@@ -5,6 +5,8 @@ def test_strip_html_removes_tags_and_keeps_text():
     assert corpus.strip_html("<ul><li>one</li><li>two</li></ul>") == "one\ntwo"
     assert corpus.strip_html("plain text") == "plain text"
     assert corpus.strip_html("a &amp; b") == "a & b"
+    full = "<!DOCTYPE html><html><head><style>body { color: #333; }</style></head><body><p>Hey Ashley!</p></body></html>"
+    assert corpus.strip_html(full) == "Hey Ashley!"
 
 
 def test_tokens_keep_accented_names_whole():

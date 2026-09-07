@@ -32,3 +32,12 @@ def test_make_row_skips_fragments_and_tags_source():
                        ts_iso="2026-01-01 00:00:00.000 +00:00", text="I will look at it tomorrow morning")
     assert row["source"] == "whatsapp" and row["words"] == 7 and row["edited"] is False
     assert row["lang"] == "en"
+
+
+def test_client_authored_rejects_server_minted_ids():
+    assert ext.client_authored("<CAF+abc@mail.gmail.com>")
+    assert ext.client_authored("<SJ0PR14MB7440.x@SJ0PR14MB7440.namprd14.prod.outlook.com>")
+    assert ext.client_authored("<anything@gmail.com>", mailer="iPhone Mail (23B85)")
+    assert not ext.client_authored("<1234567890.abc@gmail.com>")
+    assert not ext.client_authored("<xyz@mx.google.com>")
+    assert not ext.client_authored(None)
