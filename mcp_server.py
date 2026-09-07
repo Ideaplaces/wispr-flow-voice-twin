@@ -96,26 +96,20 @@ def _embed_query(query: str):
 
 
 def tool_search(query: str, k: int = 50, ctx: str | None = None) -> list[TextContent]:
-    import chromadb
-    qemb = _embed_query(query)
-    client = chromadb.PersistentClient(path=str(config.CHROMA_DIR))
-    coll = client.get_collection(COLLECTION_NAME)
-    where = {"ctx": ctx} if ctx else None
-    res = coll.query(
-        query_embeddings=[qemb],
-        n_results=k,
-        include=["documents", "metadatas", "distances"],
-        **({"where": where} if where else {}),
-    )
+    import retrieval
     rows = []
-    for did, doc, meta, dist in zip(res["ids"][0], res["documents"][0], res["metadatas"][0], res["distances"][0]):
+    for r in retrieval.search(query, k=k, ctx=ctx):
+        meta = r["meta"]
         rows.append({
-            "id": did,
-            "sim": round(1.0 - float(dist), 4),
+            "id": r["id"],
+            "sim": round(r["sim"], 4),
+            "sources": r["sources"],
             "ts": meta.get("ts", ""),
             "ctx": meta.get("ctx", ""),
+            "kind": meta.get("kind", ""),
+            "human": meta.get("human", False),
             "n_words": meta.get("n_words", 0),
-            "text": doc,
+            "text": r["text"],
         })
     return [TextContent(type="text", text=json.dumps({"query": query, "k": k, "results": rows}, ensure_ascii=False, indent=2))]
 

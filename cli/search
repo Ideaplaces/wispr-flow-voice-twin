@@ -1,56 +1,42 @@
 #!/usr/bin/env python3
-"""search - semantic search across the indexed voice corpus.
+"""search - hybrid search across the indexed voice corpus.
 
-Embeds a free-form query through the same provider used to embed the corpus,
-runs a top-K nearest-neighbor lookup against the Chroma collection, and
-prints results ranked by similarity.
+Dense (embeddings) and lexical (BM25) legs run together and are fused by
+rank, so an idea phrased differently and a proper noun spelled exactly both
+come back. Filters apply to both legs.
 
 Usage:
     search "terraform deploying sentry"
     search -k 50 "everything I said about onboarding flows"
     search --multi "how I explain my dev setup"      # LLM query variations + rank fusion
-    search --ctx team_chat "discord notifications"   # restrict to one context
-    search --since 2026-03-01 "azure key vault"      # restrict by date
-    search --json "..."                              # machine-readable output
+    search --human "pricing"                          # only rows written to people
+    search --kind status --kind ask "deploy"          # by message kind
+    search --lang fr "réunion"                        # by detected language
+    search --source whatsapp "pickup"                 # by origin (wispr, whatsapp, gmail)
+    search --ctx team_chat "discord notifications"    # restrict to one context
+    search --since 2026-03-01 "azure key vault"       # restrict by date
+    search --min-words 25 "why I moved to a cloud VM" # longer rows only
+    search --recency 1 "what I'm working on"          # favour recent rows
+    search --json "..."                               # machine-readable output
 
-Near-duplicate dictations (the same thought re-dictated across days) are
-collapsed by default so a bigger K surfaces new material instead of echoes;
---no-dedup shows everything. --multi asks the configured LLM for a few
-paraphrases of the query, runs them all, and fuses the rankings (RRF), which
-catches dictations that phrase the idea differently than the query does.
+Near-duplicate dictations are collapsed by default; --no-dedup shows all.
+--no-lexical runs the dense leg alone.
 """
 
 import argparse
 import json
-import os
 import sys
-from datetime import datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-ENV = ROOT / ".env"
-if ENV.exists():
-    for line in ENV.read_text().splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        k, v = line.split("=", 1)
-        os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
-
-from config import CHROMA_DIR  # noqa: E402
-
-COLLECTION_NAME = "voice_twin_v1"
+import corpus  # noqa: E402  (loads .env)
+import retrieval  # noqa: E402
 
 
 def query_variations(query: str, n: int):
-    """Ask the configured LLM for n-1 paraphrases; the original is always first.
-
-    Retrieval is only as good as the query's wording, and a dictation corpus
-    phrases ideas the way they were spoken, not the way a query is typed.
-    Falls back to the original query alone if no LLM provider is reachable.
-    """
+    """Ask the configured LLM for n-1 paraphrases; the original is always first."""
     try:
         import llm
         prompt = (
@@ -59,9 +45,7 @@ def query_variations(query: str, n: int):
             "short, conversational, and focused on the same topic. Return one "
             "variation per line, no numbering, nothing else.\n\nQuery: {q}"
         ).format(n=n - 1, q=query)
-        out = llm.generate(
-            [{"role": "user", "content": prompt}], max_tokens=300, temperature=0.7
-        )
+        out = llm.generate([{"role": "user", "content": prompt}], max_tokens=300, temperature=0.7)
         text = out[0] if isinstance(out, tuple) else out
         variations = [v.strip() for v in text.splitlines() if v.strip()]
         return [query] + variations[: n - 1]
@@ -70,142 +54,66 @@ def query_variations(query: str, n: int):
         return [query]
 
 
-def collapse_near_duplicates(rows, threshold=0.92):
-    """Drop rows whose text is nearly identical to an already-kept row."""
-    from difflib import SequenceMatcher
-
-    kept = []
-    for row in rows:
-        text = " ".join((row["text"] or "").lower().split())
-        duplicate = False
-        for other in kept:
-            if abs(len(text) - len(other["_norm"])) / max(len(text), len(other["_norm"]), 1) > 0.3:
-                continue
-            if SequenceMatcher(None, text, other["_norm"]).ratio() >= threshold:
-                duplicate = True
-                break
-        if not duplicate:
-            row["_norm"] = text
-            kept.append(row)
-    for row in kept:
-        del row["_norm"]
-    return kept
-
-
-def embed_query(query: str):
-    provider = os.environ.get("EMBED_PROVIDER", "auto")
-    if provider in ("azure", "auto") and os.environ.get("AZURE_OPENAI_API_KEY"):
-        from openai import AzureOpenAI
-        client = AzureOpenAI(
-            api_key=os.environ["AZURE_OPENAI_API_KEY"],
-            api_version=os.environ.get("AZURE_OPENAI_API_VERSION", "2024-02-01"),
-            azure_endpoint=os.environ["AZURE_OPENAI_ENDPOINT"],
-        )
-        deployment = os.environ.get("AZURE_OPENAI_EMBEDDING_DEPLOYMENT", "text-embedding-3-large")
-        return client.embeddings.create(model=deployment, input=[query]).data[0].embedding
-
-    from sentence_transformers import SentenceTransformer
-    model_name = os.environ.get("LOCAL_EMBED_MODEL", "sentence-transformers/all-mpnet-base-v2")
-    st = SentenceTransformer(model_name)
-    return st.encode([query], normalize_embeddings=True)[0].tolist()
-
-
 def main():
-    ap = argparse.ArgumentParser(prog="search", description="Semantic search across the voice corpus")
+    ap = argparse.ArgumentParser(prog="search", description="Hybrid search across the voice corpus")
     ap.add_argument("query", help="Natural-language query")
     ap.add_argument("-k", "--top", type=int, default=100, help="Number of results (default 100)")
     ap.add_argument("--multi", nargs="?", const=4, type=int, metavar="N",
                     help="Run N query variations (LLM paraphrases) and fuse rankings (default N=4)")
-    ap.add_argument("--no-dedup", action="store_true",
-                    help="Keep near-duplicate dictations instead of collapsing them")
-    ap.add_argument("--ctx", help="Restrict to one context (ai_chat, team_chat, personal_chat, browser, other)")
+    ap.add_argument("--no-dedup", action="store_true", help="Keep near-duplicate dictations")
+    ap.add_argument("--no-lexical", action="store_true", help="Dense leg only")
+    ap.add_argument("--human", action="store_true", help="Only rows written to people")
+    ap.add_argument("--kind", action="append", metavar="KIND",
+                    help=f"Message kind, repeatable ({', '.join(corpus.KINDS)})")
+    ap.add_argument("--lang", action="append", metavar="LANG", help="Detected language, repeatable (en, fr, ro)")
+    ap.add_argument("--source", action="append", metavar="SRC", help="Origin, repeatable (wispr, whatsapp, gmail)")
+    ap.add_argument("--ctx", help="Restrict to one context (ai_chat, team_chat, personal_chat, browser, email, other)")
+    ap.add_argument("--min-words", type=int, help="Only rows with at least N words")
     ap.add_argument("--since", help="Earliest date (YYYY-MM-DD)")
     ap.add_argument("--until", help="Latest date (YYYY-MM-DD)")
+    ap.add_argument("--recency", type=float, default=0.0,
+                    help="Weight of a recency boost, 0 = off, 1 = a fresh row outranks a year-old twin")
     ap.add_argument("--width", type=int, default=180, help="Truncate text at N chars in pretty mode")
     ap.add_argument("--json", action="store_true", help="Emit JSON instead of pretty rows")
     args = ap.parse_args()
 
-    queries = [args.query]
+    variations = None
     if args.multi and args.multi > 1:
         queries = query_variations(args.query, args.multi)
         if len(queries) > 1:
             sys.stderr.write("[multi] querying with:\n")
             for q in queries:
                 sys.stderr.write(f"  - {q}\n")
+            variations = queries[1:]
 
-    where = {}
-    if args.ctx:
-        where["ctx"] = args.ctx
-    if args.since or args.until:
-        # ts is stored as YYYY-MM-DD in metadata, so string compare works.
-        date_filter = {}
-        if args.since:
-            date_filter["$gte"] = args.since
-        if args.until:
-            date_filter["$lte"] = args.until
-        where["ts"] = date_filter
-
-    import chromadb
-    chroma = chromadb.PersistentClient(path=str(CHROMA_DIR))
-    coll = chroma.get_collection(COLLECTION_NAME)
-
-    # Over-fetch when collapsing near-duplicates so the final list still
-    # fills K with distinct material after the echoes are dropped.
-    fetch_n = args.top if args.no_dedup else min(args.top * 2, 500)
-    kwargs = dict(n_results=fetch_n, include=["documents", "metadatas", "distances"])
-    if where:
-        kwargs["where"] = where if len(where) > 1 else where
-        # Chroma needs $and wrapping when there are multiple filters in some versions;
-        # for a single-key filter the bare dict is accepted.
-        if len(where) > 1:
-            kwargs["where"] = {"$and": [{k: v} for k, v in where.items()]}
-
-    # One ranked list per query variation, fused with Reciprocal Rank Fusion:
-    # a dictation ranked well by several phrasings of the idea beats one that
-    # matched a single phrasing. With one query this reduces to plain top-K.
-    RRF_K = 60
-    by_id = {}
-    for q in queries:
-        res = coll.query(query_embeddings=[embed_query(q)], **kwargs)
-        for rank, (did, doc, meta, dist) in enumerate(
-            zip(res["ids"][0], res["documents"][0], res["metadatas"][0], res["distances"][0])
-        ):
-            row = by_id.setdefault(did, {
-                "id": did,
-                "sim": round(1.0 - float(dist), 4),
-                "ts": meta.get("ts", ""),
-                "ctx": meta.get("ctx", ""),
-                "n_words": meta.get("n_words", 0),
-                "text": doc,
-                "_rrf": 0.0,
-            })
-            row["_rrf"] += 1.0 / (RRF_K + rank + 1)
-            row["sim"] = max(row["sim"], round(1.0 - float(dist), 4))
-
-    rows = sorted(by_id.values(), key=lambda r: r["_rrf"], reverse=True)
-    for row in rows:
-        del row["_rrf"]
-
-    if not args.no_dedup:
-        before = len(rows)
-        rows = collapse_near_duplicates(rows)
-        if len(rows) < before:
-            sys.stderr.write(f"[dedup] collapsed {before - len(rows)} near-duplicate dictations\n")
-
-    rows = rows[: args.top]
+    rows = retrieval.search(
+        args.query, k=args.top, queries=variations,
+        human=True if args.human else None, lang=args.lang, kinds=args.kind, ctx=args.ctx,
+        sources=args.source, min_words=args.min_words, since=args.since, until=args.until,
+        lexical=not args.no_lexical, dedup=not args.no_dedup, recency=args.recency,
+    )
 
     if args.json:
-        print(json.dumps({"query": args.query, "k": args.top, "results": rows}, ensure_ascii=False, indent=2))
+        out = [{"id": r["id"], "sim": round(r["sim"], 4), "score": round(r["score"], 5), "sources": r["sources"],
+                "ts": r["meta"].get("ts", ""), "ctx": r["meta"].get("ctx", ""), "kind": r["meta"].get("kind", ""),
+                "human": r["meta"].get("human", False), "lang": r["meta"].get("lang", ""),
+                "source": r["meta"].get("source", ""), "n_words": r["meta"].get("n_words", 0), "text": r["text"]}
+               for r in rows]
+        print(json.dumps({"query": args.query, "k": args.top, "results": out}, ensure_ascii=False, indent=2))
         return
 
-    print(f"Top {len(rows)} dictations for: {args.query!r}")
+    print(f"Top {len(rows)} rows for: {args.query!r}")
     print("=" * 80)
     for i, r in enumerate(rows, 1):
-        ts = (r["ts"] or "")[:10]
+        meta = r["meta"]
+        ts = (meta.get("ts") or "")[:10]
+        legs = "".join(s[0] for s in r["sources"])  # d, l, or dl
+        who = "H" if meta.get("human") else " "
         text = (r["text"] or "").replace("\n", " ")
         if len(text) > args.width:
             text = text[: args.width - 1] + "…"
-        print(f"{i:2d}. [sim={r['sim']:.3f}] {ts} {r['ctx']:14s} {text}")
+        print(f"{i:3d}. [sim={r['sim']:.3f} {legs:2s} {who}] {ts} {meta.get('ctx', ''):13s} "
+              f"{meta.get('kind', ''):11s} {text}")
 
 
 if __name__ == "__main__":
