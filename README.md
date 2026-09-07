@@ -33,11 +33,13 @@ echo "VOICE_TWIN_PROFILE=$HOME/.voice-twin/profile.md" >> .env
 # Build the corpus once
 python pipeline/01_snapshot.py        # safe read-only copy of flow.sqlite
 python pipeline/02_ingest.py          # extract dictations to history.jsonl
+python pipeline/02b_enrich.py         # normalize names, flag human-facing rows, label message kinds
 python pipeline/03_style_profile.py   # compute your per-context fingerprint
 python pipeline/04_edit_rules.py      # diff Wispr-formatted vs your edits
 python pipeline/05_embed.py           # embed and load into Chroma
 python pipeline/06_topics.py          # cluster + label with the LLM
 python pipeline/08_visualize.py       # build the explorer graph
+python pipeline/10_ingest_external.py --whatsapp   # optional: add messages you typed to people
 
 # Use it
 ./cli/voice slack "tell the team I'm pushing the C3 fix today"
@@ -45,7 +47,9 @@ python pipeline/08_visualize.py       # build the explorer graph
 ./cli/topics list
 ./cli/search "deploying to production"
 ./cli/search --multi "how I explain my setup"   # LLM query variations + rank fusion
+./cli/search --human --kind status "deploy"     # only rows written to people, by message kind
 ./cli/lint draft.md                              # flag words you have never dictated
+./cli/eval                                       # score what the writer's retrieval returns
 ./cli/patterns list
 
 # Open the explorer
@@ -71,6 +75,45 @@ Wispr Flow turns voice into the primary input method. Once you cross a few hundr
 
 It started as a personal tool, then we noticed it was useful for anyone with a Wispr Flow corpus, and now it's open source.
 
+## Corpus quality: what the index knows about each row
+
+A dictation corpus is mostly the user talking to AI tools (83% of this one).
+Retrieving by topic alone hands the writer that voice as the cadence
+reference for a Slack message. The index therefore carries, per row:
+
+- `text_norm`: the text with misheard names rewritten to their canonical
+  spelling (the profile glossary, plus recurring corrections mined from the
+  user's own edits). This is what gets embedded and what BM25 sees, so
+  "Kalitravel" is one term, not four.
+- `human`: whether the row was written to a person. Derived from the app
+  (Slack, WhatsApp, iMessage, Telegram), the browser URL (Gmail, LinkedIn),
+  or the source for typed messages.
+- `kind`: ack, thanks, status, ask, scheduling, opinion, explanation,
+  instruction, other. Rules label the obvious ones; a cheap model call labels
+  the rest of the human-facing rows (`CLASSIFY_DEPLOYMENT` picks the Azure
+  deployment, `CLASSIFY_LLM=0` keeps ingest offline).
+- `lang`: Wispr's detected language, or `langdetect` for typed sources.
+- `source`: `wispr`, `whatsapp`, `gmail`.
+
+The writer then makes two retrievals instead of one. **Cadence** comes from
+human-facing rows of the same kind and language, near-duplicates collapsed,
+with a mild recency boost. **Grounding** comes from every context and is shown
+to the model as facts only. Long-form modes (blog, LinkedIn) take their
+cadence from human-facing rows of 25 words or more instead of a kind.
+
+`cli/eval` measures the result on a fixed request set. `eval/queries.example.json`
+is the shape; keep your own set in `data/eval/queries.json`.
+
+## Adding messages you typed
+
+`pipeline/10_ingest_external.py` loads the user's own messages from other
+archives into the same collection, tagged by source: `--whatsapp` reads the
+feeds.sqlite archive kept by the Mac sync station, `--gmail-work USER` reads
+sent mail from a Google Workspace mailbox through the delegated service
+account, `--gmail-personal` reads the personal Gmail's Sent folder over IMAP.
+Quoted history, signatures, forwards and calendar answers are dropped.
+Typed text skips the mishearing glossary. Idempotent by id.
+
 ## MCP server
 
 The voice twin ships an MCP server that runs as a stdio child process. Drop it into Claude Desktop, Claude Code, or Cursor and seven tools appear automatically: `voice_search`, `voice_topics_list`, `voice_topic_show`, `voice_topic_find`, `voice_draft`, `voice_coach`, `voice_patterns_list`. Any session in any client gains the ability to query your corpus, draft in your voice, and surface your automation candidates without leaving the chat.
@@ -83,6 +126,7 @@ Setup details and per-client config in [docs/mcp.md](docs/mcp.md).
 flow.sqlite (Wispr Flow source)
     ↓  pipeline/01_snapshot   safe copy
     ↓  pipeline/02_ingest     extract to history.jsonl
+    ↓  pipeline/02b_enrich    text_norm, human flag, message kind (rules + model)
     ↓  pipeline/03_style      style fingerprint per context
     ↓  pipeline/04_edit_rules diff Wispr formatting vs your edits
     ↓  pipeline/05_embed      Chroma vector store
@@ -90,12 +134,20 @@ flow.sqlite (Wispr Flow source)
     ↓  pipeline/07_ingest_delta   incremental updates from new dictations
     ↓  pipeline/08_visualize  graph artifact for the explorer
     ↓  pipeline/09_patterns   automation candidate detection
+    ↓  pipeline/10_ingest_external   messages you typed to people (WhatsApp, sent mail)
 
 cli/voice  <mode> "topic"   draft in your voice (slack/linkedin/blog/...)
 cli/topics list/show/find    browse the topical map
-cli/search "..."             semantic search across the corpus
-                             (--multi runs LLM query variations and fuses
-                             rankings; near-duplicates collapse by default)
+cli/search "..."             hybrid search: dense + BM25 fused by rank, so a
+                             proper noun spelled exactly and an idea phrased
+                             differently both come back. Filters: --human,
+                             --kind, --lang, --source, --ctx, --since, --min-words,
+                             --recency. --multi adds LLM paraphrases; near-
+                             duplicates collapse by default
+cli/eval                     retrieval quality check on a fixed request set:
+                             human share, kind match, language purity,
+                             near-duplicate rate, proper-noun recall. Exit 1
+                             under a threshold, so it slots into CI
 cli/lint <draft>             vocabulary check: flags words with zero corpus
                              hits (never your voice), warns on rare ones.
                              A blocklist catches known AI tells; this
