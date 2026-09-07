@@ -39,7 +39,6 @@ python pipeline/04_edit_rules.py      # diff Wispr-formatted vs your edits
 python pipeline/05_embed.py           # embed and load into Chroma
 python pipeline/06_topics.py          # cluster + label with the LLM
 python pipeline/08_visualize.py       # build the explorer graph
-python pipeline/10_ingest_external.py --whatsapp   # optional: add messages you typed to people
 
 # Use it
 ./cli/voice slack "tell the team I'm pushing the C3 fix today"
@@ -93,7 +92,10 @@ reference for a Slack message. The index therefore carries, per row:
   the rest of the human-facing rows (`CLASSIFY_DEPLOYMENT` picks the Azure
   deployment, `CLASSIFY_LLM=0` keeps ingest offline).
 - `lang`: Wispr's detected language, or `langdetect` for typed sources.
-- `source`: `wispr`, `whatsapp`, `gmail`.
+- `source`: always `wispr`. The corpus is dictation only, on purpose: it is
+  the one channel where every word is provably the user's. Messages posted to
+  Slack, WhatsApp or email are increasingly drafted by an assistant and pasted,
+  and loading them back would feed that writing into the voice reference.
 
 The writer then makes two retrievals instead of one. **Cadence** comes from
 human-facing rows of the same kind and language, near-duplicates collapsed,
@@ -103,16 +105,6 @@ cadence from human-facing rows of 25 words or more instead of a kind.
 
 `cli/eval` measures the result on a fixed request set. `eval/queries.example.json`
 is the shape; keep your own set in `data/eval/queries.json`.
-
-## Adding messages you typed
-
-`pipeline/10_ingest_external.py` loads the user's own messages from other
-archives into the same collection, tagged by source: `--whatsapp` reads the
-feeds.sqlite archive kept by the Mac sync station, `--gmail-work USER` reads
-sent mail from a Google Workspace mailbox through the delegated service
-account, `--gmail-personal` reads the personal Gmail's Sent folder over IMAP.
-Quoted history, signatures, forwards and calendar answers are dropped.
-Typed text skips the mishearing glossary. Idempotent by id.
 
 ## MCP server
 
@@ -134,14 +126,13 @@ flow.sqlite (Wispr Flow source)
     ↓  pipeline/07_ingest_delta   incremental updates from new dictations
     ↓  pipeline/08_visualize  graph artifact for the explorer
     ↓  pipeline/09_patterns   automation candidate detection
-    ↓  pipeline/10_ingest_external   messages you typed to people (WhatsApp, sent mail)
 
 cli/voice  <mode> "topic"   draft in your voice (slack/linkedin/blog/...)
 cli/topics list/show/find    browse the topical map
 cli/search "..."             hybrid search: dense + BM25 fused by rank, so a
                              proper noun spelled exactly and an idea phrased
                              differently both come back. Filters: --human,
-                             --kind, --lang, --source, --ctx, --since, --min-words,
+                             --kind, --lang, --ctx, --since, --min-words,
                              --recency. --multi adds LLM paraphrases; near-
                              duplicates collapse by default
 cli/eval                     retrieval quality check on a fixed request set:

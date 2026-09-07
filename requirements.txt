@@ -10,7 +10,4 @@ mcp>=1.0               # MCP server SDK
 pyyaml>=6.0            # profile.md frontmatter parsing
 requests>=2.30         # remote profile loading + Ollama HTTP client
 rank-bm25>=0.2         # lexical leg of hybrid search
-langdetect>=1.0        # language of typed messages (WhatsApp, email)
-google-api-python-client>=2.100   # optional: sent mail from a Google Workspace mailbox
-google-auth>=2.20      # optional: same
 pytest>=8.0            # tests

@@ -12,7 +12,6 @@ Usage:
     search --human "pricing"                          # only rows written to people
     search --kind status --kind ask "deploy"          # by message kind
     search --lang fr "réunion"                        # by detected language
-    search --source whatsapp "pickup"                 # by origin (wispr, whatsapp, gmail)
     search --ctx team_chat "discord notifications"    # restrict to one context
     search --since 2026-03-01 "azure key vault"       # restrict by date
     search --min-words 25 "why I moved to a cloud VM" # longer rows only
@@ -66,7 +65,6 @@ def main():
     ap.add_argument("--kind", action="append", metavar="KIND",
                     help=f"Message kind, repeatable ({', '.join(corpus.KINDS)})")
     ap.add_argument("--lang", action="append", metavar="LANG", help="Detected language, repeatable (en, fr, ro)")
-    ap.add_argument("--source", action="append", metavar="SRC", help="Origin, repeatable (wispr, whatsapp, gmail)")
     ap.add_argument("--ctx", help="Restrict to one context (ai_chat, team_chat, personal_chat, browser, email, other)")
     ap.add_argument("--min-words", type=int, help="Only rows with at least N words")
     ap.add_argument("--since", help="Earliest date (YYYY-MM-DD)")
@@ -89,7 +87,7 @@ def main():
     rows = retrieval.search(
         args.query, k=args.top, queries=variations,
         human=True if args.human else None, lang=args.lang, kinds=args.kind, ctx=args.ctx,
-        sources=args.source, min_words=args.min_words, since=args.since, until=args.until,
+        min_words=args.min_words, since=args.since, until=args.until,
         lexical=not args.no_lexical, dedup=not args.no_dedup, recency=args.recency,
     )
 
