@@ -17,6 +17,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 import config  # noqa: E402
+import corpus  # noqa: E402
 
 BOM = "﻿"
 
@@ -52,6 +53,7 @@ def main():
            WHERE timestamp IS NOT NULL"""
     )
 
+    glossary = corpus.load_glossary()
     config.HISTORY_JSONL.parent.mkdir(parents=True, exist_ok=True)
     written = 0
     skipped_short = 0
@@ -83,7 +85,8 @@ def main():
                 "n_corrected": r["numWordsCorrected"] or 0,
                 "n_dict_repl": r["numDictionaryReplacements"] or 0,
             }
-            out.write(json.dumps(rec) + "\n")
+            corpus.enrich(rec, glossary)
+            out.write(json.dumps(rec, ensure_ascii=False) + "\n")
             written += 1
 
     print(f"Wrote {written:,} records to {config.HISTORY_JSONL}")

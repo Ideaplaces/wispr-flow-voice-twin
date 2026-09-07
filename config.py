@@ -9,6 +9,27 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 
+
+def _load_env(path: Path) -> None:
+    """KEY=value lines from .env into os.environ, never overriding a set var.
+
+    Lives here so that whichever module is imported first, the provider
+    settings below are read after .env is loaded. A caller that imported
+    config before the .env loader once fell through to the local embedding
+    model against an Azure-embedded index.
+    """
+    if not path.exists():
+        return
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
+
+
+_load_env(ROOT / ".env")
+
 # ---------------------------------------------------------------------------
 # Source data
 # ---------------------------------------------------------------------------

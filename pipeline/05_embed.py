@@ -29,6 +29,7 @@ if ENV.exists():
         os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
 
 import config  # noqa: E402
+import corpus  # noqa: E402
 
 COLLECTION_NAME = "voice_twin_v1"
 BATCH = 64
@@ -75,13 +76,14 @@ def main():
         sys.exit(2)
 
     # Load records, filter
+    glossary = corpus.load_glossary()
     records = []
-    with config.HISTORY_JSONL.open() as f:
-        for line in f:
-            r = json.loads(line)
-            if (r["words"] or 0) < config.MIN_WORDS_FOR_INDEX:
-                continue
-            records.append(r)
+    for r in corpus.load_history():
+        if (r["words"] or 0) < config.MIN_WORDS_FOR_INDEX:
+            continue
+        if "text_norm" not in r or "human" not in r:
+            corpus.enrich(r, glossary)
+        records.append(r)
     print(f"Indexing {len(records):,} records "
           f"(skipped <{config.MIN_WORDS_FOR_INDEX} word fragments)")
 
@@ -100,22 +102,13 @@ def main():
     t0 = time.time()
     for i in range(0, len(records), BATCH):
         chunk = records[i:i + BATCH]
-        texts = [c["text"] for c in chunk]
+        texts = [corpus.index_text(c) for c in chunk]
         embs = embed(texts)
-        coll.add(
+        coll.upsert(
             ids=[c["id"] for c in chunk],
             embeddings=embs,
             documents=texts,
-            metadatas=[
-                {
-                    "ctx": c["ctx"],
-                    "app": c["app"],
-                    "ts": c["ts"][:10] if c["ts"] else "",
-                    "edited": c["edited"],
-                    "n_words": c["words"],
-                }
-                for c in chunk
-            ],
+            metadatas=[corpus.build_metadata(c) for c in chunk],
         )
         elapsed = time.time() - t0
         rate = (i + len(chunk)) / max(0.01, elapsed)

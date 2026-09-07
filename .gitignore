@@ -41,3 +41,7 @@ venv/
 
 # Corpus vocabulary cache built by cli/lint (personal dictation data)
 data/vocab_counts.json
+
+# Lexical index cache and private evaluation set (personal dictation data)
+data/bm25.pkl
+data/eval/
