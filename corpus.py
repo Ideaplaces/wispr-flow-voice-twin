@@ -390,17 +390,26 @@ def collection_ids(coll, batch: int = 5000) -> set[str]:
 # ---------------------------------------------------------------------------
 
 
-def collapse_near_duplicates(rows: list[dict], key: str = "text", threshold: float = 0.92) -> list[dict]:
-    """Drop rows whose text is nearly identical to an already-kept row."""
+def collapse_near_duplicates(rows: list[dict], key: str = "text", threshold: float = 0.92,
+                             limit: int | None = None) -> list[dict]:
+    """Drop rows whose text is nearly identical to an already-kept row.
+
+    Stops once `limit` rows are kept: the pairwise pass is quadratic, and a
+    search over hundreds of candidates only returns the first few.
+    """
     kept: list[dict] = []
     norms: list[str] = []
     for row in rows:
+        if limit is not None and len(kept) >= limit:
+            break
         text = " ".join((row.get(key) or "").lower().split())
         duplicate = False
         for other in norms:
             if abs(len(text) - len(other)) / max(len(text), len(other), 1) > 0.3:
                 continue
-            if SequenceMatcher(None, text, other).ratio() >= threshold:
+            # The quick ratios are upper bounds on ratio(), so they only skip pairs that cannot match.
+            sm = SequenceMatcher(None, text, other)
+            if sm.real_quick_ratio() >= threshold and sm.quick_ratio() >= threshold and sm.ratio() >= threshold:
                 duplicate = True
                 break
         if not duplicate:

@@ -261,5 +261,5 @@ def search(query: str, k: int = 8, *, queries: list[str] | None = None, human=No
 
     ordered = sorted(rows.values(), key=lambda r: r["score"], reverse=True)
     if dedup:
-        ordered = corpus.collapse_near_duplicates(ordered, key="text")
+        ordered = corpus.collapse_near_duplicates(ordered, key="text", limit=k)
     return ordered[:k]

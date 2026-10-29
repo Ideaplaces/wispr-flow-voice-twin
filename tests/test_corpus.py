@@ -67,3 +67,10 @@ def test_collapse_near_duplicates_and_rrf():
     assert len(corpus.collapse_near_duplicates(rows)) == 2
     scores = corpus.rrf_fuse([["a", "b"], ["b", "c"]], k=1)
     assert scores["b"] > scores["a"] > scores["c"]
+
+
+def test_collapse_near_duplicates_stops_at_limit():
+    rows = [{"text": "I just pushed the fix"}, {"text": "I just pushed the fix."},
+            {"text": "Totally different"}, {"text": "A third idea"}, {"text": "A fourth one"}]
+    kept = corpus.collapse_near_duplicates(rows, limit=2)
+    assert [r["text"] for r in kept] == ["I just pushed the fix", "Totally different"]
